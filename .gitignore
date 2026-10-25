@@ -6,3 +6,5 @@ export/
 headless_out/
 ui_out/
 *.strata
+build/
+dist/

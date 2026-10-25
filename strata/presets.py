@@ -67,3 +67,29 @@ SMART_MATERIALS = {
              gen=MaskGen(kind=1, level=0.9, softness=0.02, noise_amount=0.5, noise_scale=3.0, invert=True)),
     ],
 }
+
+
+# ---------------------------------------------------------------------------------- smart masks
+# A smart mask is a reusable mask stack: a legacy generator slot and/or a list of mask effects.
+from .layers import Effect  # noqa: E402
+
+
+def _gen_fx(kind, blend=0, opacity=1.0, **kw):
+    return Effect("generator", blend=blend, opacity=opacity, params={"gen": MaskGen(kind=kind, **kw)})
+
+
+SMART_MASKS = {
+    "Edge Wear": lambda: [_gen_fx(1, level=0.82, softness=0.05, noise_amount=0.4, noise_scale=2.0)],
+    "Edge Wear (subtle)": lambda: [_gen_fx(1, level=0.9, softness=0.03, noise_amount=0.6, noise_scale=3.0)],
+    "Dirt in Cavities": lambda: [_gen_fx(2, level=0.45, softness=0.2, noise_amount=0.5, noise_scale=1.5)],
+    "Dust (top surfaces)": lambda: [_gen_fx(4, level=0.8, softness=0.1, noise_amount=0.5, noise_scale=2.5)],
+    "Ambient Occlusion Grime": lambda: [_gen_fx(3, level=0.35, softness=0.15, noise_amount=0.3)],
+    "Thin Areas": lambda: [_gen_fx(7, level=0.25, softness=0.1, invert=True, noise_amount=0.1)],
+    "Bottom Fade": lambda: [_gen_fx(5, level=0.3, softness=0.25, invert=True, noise_amount=0.3)],
+    "Grunge Patches": lambda: [_gen_fx(12, level=0.62, softness=0.08, noise_scale=1.5)],
+    "Spots": lambda: [_gen_fx(13, level=0.78, softness=0.05, noise_scale=1.2)],
+    "Worn Edges + Cavity Dirt": lambda: [
+        _gen_fx(1, level=0.84, softness=0.05, noise_amount=0.4, noise_scale=2.0),
+        _gen_fx(2, blend=13, level=0.5, softness=0.2, noise_amount=0.5)],
+    "Sun Bleached (light from above)": lambda: [_gen_fx(9, level=0.6, softness=0.2, azimuth=0.4, elevation=1.2)],
+}

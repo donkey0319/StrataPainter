@@ -5,3 +5,4 @@ PyOpenGL>=3.1.7
 numpy>=1.24
 Pillow>=10.0
 assimp-py>=1.0   # optional: FBX / glTF import
+h5py>=3.8         # Substance Painter .spp / .spsm / .spmsk import
