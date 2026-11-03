@@ -50,7 +50,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..layers import Effect, Layer, MaskGen, Projection, BLEND, GEN, N_CH, CH_KEYS, group as _group, _uid as _uid_next
+from ..layers import (Effect, Layer, MaskGen, Projection, BLEND, GEN, N_CH, CH_KEYS,
+                      group as _group, _uid as _uid_next, renew_persistent_ids)
 
 
 def make_group_layer(name):
@@ -221,6 +222,7 @@ class ImportResult:
     notes: list
     kind: str = ""
     version: str = ""
+    report: dict = field(default_factory=dict)
 
     def summary(self) -> str:
         n = sum(1 for il in self.layers for _ in il.walk())
@@ -268,13 +270,15 @@ def cached_image(spf, url) -> str | None:
     key = spf.resource_key(url)
     if not key:
         return None
-    h = hashlib.sha1(f"{os.path.abspath(spf.path)}|{key}".encode()).hexdigest()[:20]
+    h = hashlib.sha256(spf.raw(key)).hexdigest()
     path = os.path.join(cache_dir(), h + ".png")
     if os.path.exists(path):
         return path
-    img = spf.image(key, max_size=4096)
+    img = spf.image(key, max_size=None)
     if img is None:
         return None
+    if not np.isfinite(img).all() or np.any(img < 0) or np.any(img > 1):
+        raise ValueError("Embedded HDR image needs an explicit float-image adapter; no clamped fallback was made")
     from ..imageio import write_image
     if img.shape[2] == 2:
         img = np.dstack([img[..., :1]] * 3 + [img[..., 1:2]])
@@ -735,7 +739,7 @@ class _Part:
         return en
 
 
-_ADJUSTMENTS = ("hsl", "hsl_perceptive", "fx_hsl", "blur", "fx_blur", "blur_grayscale", "contrast_luminosity")
+_ADJUSTMENTS = ("hsl", "hsl_perceptive", "fx_hsl", "blur", "fx_blur", "blur_grayscale", "contrast_luminosity", "sharpen", "fx_sharpen", "warp", "fx_warp", "gradient", "fx_gradient", "gradient_map")
 
 
 def _adjustment_part(ch) -> _Part:
@@ -1139,17 +1143,30 @@ class Converter:
                                              "channel": 0 if ch & CH_BASE else 1}, name="Contrast / luminosity"))
         elif n in ("gradient", "fx_gradient", "gradient_map") and ch & CH_BASE:
             cols = _gradient_colors(tw)
+            if not cols:
+                self.notes.add("Gradient filter without readable color stops was left out", name)
             if cols:
-                pt.values[0] = [sum(c[i] for c in cols) / len(cols) for i in range(3)]
-                pt.variation = max(pt.variation, 0.25)
-                pt.base_unknown = False
-                pt.set |= CH_BASE
-                self.notes.add("Gradient maps became their average colour + variation", name)
+                from ..graphs import preset
+                graph = preset("gradient")
+                selected = cols[:8]
+                graph["nodes"][-1]["params"]["stops"] = [[i / max(len(selected)-1,1), *color[:3]] for i,color in enumerate(selected)]
+                if len(selected) == 1:
+                    graph["nodes"][-1]["params"]["stops"] = [[0.,*selected[0][:3]],[1.,*selected[0][:3]]]
+                pt.effects.append(Effect(kind="graph",params={"graph":graph,"channel":0},name="Imported gradient"))
+                self.notes.add("Gradient colors use an editable native luminance ramp with uniform stop positions", name)
+                if len(cols)>8:self.notes.add("Gradient stops beyond eight were left out",name)
         elif n.startswith("finish_") or n.startswith("matfinish"):
             pt.variation = max(pt.variation, 0.15)
             self.notes.add("Material finish filters became roughness variation", n)
         elif n in ("sharpen", "fx_sharpen", "warp", "fx_warp"):
-            pass                      # detail filters: harmless to leave out
+            from ..graphs import preset
+            op = "sharpen" if "sharpen" in n else "warp"
+            graph = preset(op)
+            graph["nodes"][-1]["params"]["strength"] = _clamp(_num(_tw(tw,"intensity","Intensity"),1.),0.,8. if op=="sharpen" else 256.)
+            for bit,index in CH_TO_STRATA:
+                if ch & bit:
+                    pt.effects.append(Effect(kind="graph",params={"graph":graph,"channel":index},name="Imported " + op))
+            self.notes.add("Detail filters use editable native kernels; source graph appearance is unvalidated",n)
         else:
             self.notes.add("Filters on layer content were ignored", proc_name(proc) or "filter")
 
@@ -1164,7 +1181,7 @@ class Converter:
         lv = _levels_params(a.get("levels"))
         targets = [i for bit, i in CH_TO_STRATA if ch & bit] or \
                   [i for i, e in enumerate(parts[-1].enabled()) if e] or [0]
-        for i in targets[:3]:
+        for i in targets:
             parts[-1].effects.append(Effect(kind="levels", params=dict(lv, channel=i), name="Levels"))
 
     def _paint_job(self, a: HObj, erase=False):
@@ -1188,6 +1205,19 @@ class Converter:
             "pressure_flow_min": _num(val(em.get("pressureFlowMinimum")) if em else None, 0.0),
             "hardness": _clamp(hard),
         }
+        if isinstance(em,HObj):
+            for source,target in (("sizeJitter","size_jitter"),("flowJitter","flow_jitter"),("angleJitter","angle_jitter"),("positionJitter","pos_jitter")):
+                if em.get(source) is not None:brush[target]=_clamp(_num(val(em.get(source))))
+        for source in a.get("sourceTransparent") or []:
+            if isinstance(source,HObj) and source.type=="DataSourceBitmap":
+                bitmap=source.get("bitmap")
+                if isinstance(bitmap,HObj):
+                    try:
+                        brush["alpha"]=cached_image(self.spf,text(bitmap.get("urlToBitmapRes")))
+                        if not brush["alpha"]:self.notes.add("Stroke bitmap alphas not embedded in the file were left out",text(a.get("label")) or "stroke")
+                    except Exception as error:self.notes.add("Stroke alpha could not be extracted",str(error))
+        if isinstance(br,HObj) and br.get("symmetry") is not None:
+            self.notes.add("Source brush symmetry is retained in metadata but not mapped without a validated convention",text(a.get("label")) or "stroke")
         job = PaintJob(strokes=strokes, brush=brush, erase=erase, label=text(a.get("label")))
         pt = _Part()
         mask_val = False
@@ -1348,6 +1378,7 @@ class Converter:
             # an anchor inside another mask: Strata rebuilds that mask here, same effects and noise
             fx, base, painted, src_seed, nm = self.mask_anchors[src]
             fx = copy.deepcopy(fx)
+            renew_persistent_ids(Layer("Referenced mask", mask_effects=fx))
             for e in fx:
                 e.uid = _uid_next()
                 if e.kind == "generator":
@@ -1398,8 +1429,13 @@ class Converter:
                                      name="Histogram scan"))
         elif n in ("invert", "fx_invert"):
             mb.effects.append(Effect(kind="invert", opacity=op, name="Invert"))
-        elif n in ("sharpen", "fx_sharpen", "warp", "fx_warp", "mirror"):
-            self.notes.add("Mask warp / sharpen / mirror filters were left out", n)
+        elif n in ("sharpen", "fx_sharpen", "warp", "fx_warp"):
+            from ..graphs import preset
+            operation = "sharpen" if "sharpen" in n else "warp"
+            mb.effects.append(Effect(kind="graph",opacity=op,params={"graph":preset(operation)},name="Imported " + operation))
+            self.notes.add("Mask detail filters use editable native kernels; source graph appearance is unvalidated",n)
+        elif n == "mirror":
+            self.notes.add("Mask mirror filter was left out",n)
         else:
             self.notes.add("Mask filters were left out", proc_name(proc) or "filter")
 
@@ -1453,8 +1489,11 @@ def convert_mask_preset(root: HObj, spf=None, name: str = ""):
 
 def fresh_copy(layers: list) -> list:
     """Deep copies of ImportedLayers with new uids (every drop of a smart material is independent)."""
-    from ..layers import _uid
+    from ..layers import _uid, bind_anchor_references, renew_persistent_ids
     out = copy.deepcopy(layers)
+    forest = [x.layer for il in out for x in il.walk()]
+    bind_anchor_references(forest)
+    renew_persistent_ids(forest)
     for il in out:
         for x in il.walk():
             x.layer.uid = _uid()

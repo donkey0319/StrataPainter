@@ -1,0 +1,10 @@
+---
+description: Commit and track completed agent changes while keeping tests private
+alwaysApply: true
+---
+
+Follow the repository-root AGENTS.md for every project change. The owner has
+provided standing authorization to verify, commit, and push completed agent
+work. Preserve unrelated changes, keep tests and evidence ignored and unindexed,
+use descriptive commits, and verify upstream tracking after pushing. Do not
+force-push, rewrite history, publish tests, or create releases automatically.

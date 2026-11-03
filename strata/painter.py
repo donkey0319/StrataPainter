@@ -9,6 +9,8 @@ screen-space pick buffer, so they work across UV seams.
 from __future__ import annotations
 
 import math
+import re
+import time
 from dataclasses import dataclass, field
 
 import moderngl
@@ -16,7 +18,9 @@ import numpy as np
 
 from . import shaders as S
 from .gpu import GPU, GPUMesh
-from .layers import Brush, Layer, CH_KEYS, CH_COMPONENTS, N_CH
+from .layers import Brush, Layer
+from .channels import CHANNEL_DESCRIPTORS, N_CH
+from .userchannels import paint_channels, descriptor, is_user
 from .mathutil import glmat, normalize
 
 PAINT_BLEND = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA, moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA)
@@ -25,6 +29,21 @@ COVER_BLEND = (moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA)
 
 TOOL_PAINT, TOOL_SMUDGE, TOOL_CLONE, TOOL_PROJECTION = range(4)
 IDENTITY = np.eye(4)
+
+
+def channel_shader(source, keys):
+    """Compact MRT locations for authored channels; retain the established shader math."""
+    keys = ["H" if is_user(key) else key for key in keys]
+    enabled = {channel.index: index for index, channel in enumerate(c for c in CHANNEL_DESCRIPTORS if c.key in keys)}
+    for channel in CHANNEL_DESCRIPTORS:
+        i = channel.index
+        declaration = f"layout(location={i}) out vec4 o{i};"
+        if i in enabled:
+            source = source.replace(declaration, f"layout(location={enabled[i]}) out vec4 o{i};")
+        else:
+            source = source.replace(declaration, "")
+            source = re.sub(rf"\bo{i}\s*=\s*[^;]*;", "", source)
+    return source
 
 
 @dataclass
@@ -37,8 +56,12 @@ class View:
     pick_pos: object          # textures from the renderer's pick pass
     pick_uv: object
     wpp: callable             # world_per_pixel(point) -> float
+    uv_mapping: object = None # native 2D mapping; distances are UV units
+    tile_offset: tuple = (0, 0) # global operation coordinates -> local raster coordinates
 
     def project(self, p):
+        if self.uv_mapping is not None:
+            return self.uv_mapping.pixel(np.asarray(p)[:2])
         c = self.vp @ np.append(np.asarray(p, float), 1.0)
         if c[3] <= 1e-9:
             return None
@@ -152,16 +175,25 @@ class Painter:
         g = self.gpu
         set_ = g.set
         res = self.resources
+        mapping = view.uv_mapping
+        tile = np.asarray(view.tile_offset, float)
+        set_(p, "u_uvView", int(mapping is not None))
+        if mapping is not None:
+            set_(p, "u_uvScale", tuple(mapping.scale))
+            set_(p, "u_uvCenter", tuple(np.asarray(mapping.center) - tile))
         if dab is not None:
             T, B, N = dab.frame
-            set_(p, "u_hit", tuple(map(float, dab.hit)))
+            hit = np.asarray(dab.hit, float).copy()
+            if mapping is not None:
+                hit[:2] -= tile
+            set_(p, "u_hit", tuple(map(float, hit)))
             set_(p, "u_radius", float(dab.radius))
             set_(p, "u_fT", tuple(map(float, T))); set_(p, "u_fB", tuple(map(float, B)))
             set_(p, "u_fN", tuple(map(float, N)))
             set_(p, "u_rot", tuple(map(float, dab.rot)))
             set_(p, "u_hitPx", tuple(map(float, dab.hit_px)))
             set_(p, "u_radiusPx", float(max(dab.radius_px, 1e-3)))
-            set_(p, "u_hitUV", tuple(map(float, dab.hit_uv)))
+            set_(p, "u_hitUV", tuple(map(float, np.asarray(dab.hit_uv) - tile)))
             set_(p, "u_radiusUV", float(max(dab.radius_uv, 1e-6)))
             set_(p, "u_flow", float(dab.flow))
             set_(p, "u_occl", int(dab.occl))
@@ -186,7 +218,7 @@ class Painter:
         set_(p, "u_hardness", float(brush.hardness))
         set_(p, "u_grain", float(brush.grain))
         set_(p, "u_grainScale", float(brush.grain_scale) / max(mesh_radius, 1e-3))
-        units = {"u_pickPos": (0, view.pick_pos or g.black)}
+        units = {"u_pickPos": (0, view.pick_pos or g.black), "u_uvCoverage": (14, view.pick_pos or g.black)}
         alpha = res.alpha(brush.alpha) if (res and brush.alpha) else None
         set_(p, "u_hasAlpha", int(alpha is not None))
         set_(p, "u_alphaInv", int(bool(brush.alpha_invert)))
@@ -210,36 +242,42 @@ class Painter:
 
     def _paint_values(self, p, brush: Brush, erase: bool):
         g = self.gpu
-        en = [int(bool(e)) for e in brush.enabled]
-        g.set(p, "u_en", tuple(en))
-        g.set(p, "u_color", tuple(map(float, brush.color)))
-        g.set(p, "u_normal", tuple(map(float, brush.normal)))
-        g.set(p, "u_emissive", tuple(map(float, brush.emissive)))
-        g.set(p, "u_rough", float(brush.rough)); g.set(p, "u_metal", float(brush.metal))
-        g.set(p, "u_height", float(brush.height)); g.set(p, "u_opac", float(brush.opac))
+        en = [int(bool(brush.enabled[channel.index])) for channel in CHANNEL_DESCRIPTORS]
+        if brush.user_channel and brush.target == 0:
+            en = [0, 0, 0, 1, 0, 0, 0]
+        if "u_en" in p:
+            p["u_en"].value = tuple(en[:p["u_en"].array_length]) if p["u_en"].array_length > 1 else en[0]
+        for channel in CHANNEL_DESCRIPTORS:
+            value = brush.user_value if brush.user_channel and brush.target == 0 and channel.key == "H" else getattr(brush, channel.attribute)
+            if self.resources is not None and channel.key in ("C", "E"):
+                value = self.resources.pipeline.working(value)
+            uniform_value = tuple(map(float, value)) if channel.value_components > 1 else float(value)
+            g.set(p, "u_" + channel.attribute, uniform_value)
 
     def _projection_units(self, p, brush: Brush, view: View, active: bool):
         g, res = self.gpu, self.resources
         units, has = {}, [0] * N_CH
         size = None
         if active and res:
-            for i, k in enumerate(CH_KEYS):
-                path = brush.proj_maps.get(k)
-                if not path:
+            for channel in CHANNEL_DESCRIPTORS:
+                i = channel.index
+                path = brush.proj_maps.get(channel.key)
+                if not path or not brush.enabled[i]:
                     continue
                 try:
-                    t = res.texture(path, "color" if k in ("C", "E") else "data")
+                    t = res.texture(path, channel.resource_kind)
                 except Exception as e:
                     print(f"[strata] projection map {path}: {e}")
                     continue
                 units[f"u_p{i}"] = (4 + i, t)
                 has[i] = 1
                 size = size or t.size
-        for i in range(N_CH):
-            units.setdefault(f"u_p{i}", (4 + i, g.black))
+        for channel in CHANNEL_DESCRIPTORS:
+            units.setdefault(f"u_p{channel.index}", (4 + channel.index, g.black))
         active = active and any(has)
         g.set(p, "u_projActive", int(active))
-        g.set(p, "u_hasP", tuple(has))
+        if "u_hasP" in p:
+            p["u_hasP"].value = tuple(has[:p["u_hasP"].array_length]) if p["u_hasP"].array_length > 1 else has[0]
         if active and "u_projXf" in p:
             p["u_projXf"].write(_mat3(stencil_matrix(brush.proj_xform, size, view.size)))
             g.set(p, "u_projTile", int(brush.proj_tiling))
@@ -249,13 +287,17 @@ class Painter:
         ctx = self.gpu.ctx
         fbo.use()
         ctx.viewport = (0, 0, size[0], size[1])
+        ctx.scissor = None
         ctx.disable(moderngl.DEPTH_TEST | moderngl.CULL_FACE)
 
     # ------------------------------------------------------------------ dabs
     def dab_paint(self, gm: GPUMesh, subset, buffers: list, brush: Brush, view: View, dab: Dab,
                   quick, projection: bool):
         """Accumulate one dab into a 7-texture stroke buffer (paint, erase or projection)."""
-        p = self.p_paint
+        keys = [c.key for c in paint_channels(brush)]
+        vertex = S.UV_BRUSH_VS if view.uv_mapping is not None else S.UV_VS
+        p = self.gpu.program("brush_sparse_" + str(view.uv_mapping is not None) + "".join(keys),
+                             vertex, channel_shader(S.BRUSH_PAINT_FS, keys))
         units = self._common(p, brush, view, dab, quick, gm.mesh.radius)
         units.update(self._projection_units(p, brush, view, projection))
         self._paint_values(p, brush, False)
@@ -265,12 +307,13 @@ class Painter:
         ctx.enable(moderngl.BLEND)
         ctx.blend_equation = moderngl.FUNC_ADD
         ctx.blend_func = PAINT_BLEND
-        gm.render(p, subset)
+        self.gpu.draw_quad(p) if view.uv_mapping is not None else gm.render(p, subset)
         ctx.disable(moderngl.BLEND)
 
     def dab_mask(self, gm: GPUMesh, subset, buffer, brush: Brush, view: View, dab: Dab, quick):
         """Accumulate one dab's coverage into a single-channel stroke buffer."""
-        p = self.p_mask
+        p = (self.gpu.program("uv_brush_mask", S.UV_BRUSH_VS, S.BRUSH_MASK_FS)
+             if view.uv_mapping is not None else self.p_mask)
         units = self._common(p, brush, view, dab, quick, gm.mesh.radius)
         self.gpu.set(p, "u_direct", 0)
         self.gpu.bind(p, units)
@@ -279,13 +322,15 @@ class Painter:
         ctx.enable(moderngl.BLEND)
         ctx.blend_equation = moderngl.FUNC_ADD
         ctx.blend_func = COVER_BLEND
-        gm.render(p, subset)
+        self.gpu.draw_quad(p) if view.uv_mapping is not None else gm.render(p, subset)
         ctx.disable(moderngl.BLEND)
 
     def dab_sample(self, gm: GPUMesh, subset, targets: list, sources: list, brush: Brush, view: View,
                    dab: Dab, quick, offset_px):
         """Smudge / clone: for each target texture pull texels from `sources` at a screen offset."""
-        g, p = self.gpu, self.p_sample
+        g = self.gpu
+        p = (g.program("uv_brush_sample", S.UV_BRUSH_VS, S.SAMPLE_TOOL_FS)
+             if view.uv_mapping is not None else self.p_sample)
         units = self._common(p, brush, view, dab, quick, gm.mesh.radius)
         g.set(p, "u_offsetPx", tuple(float(x) for x in offset_px))
         ctx = g.ctx
@@ -299,20 +344,24 @@ class Painter:
             g.bind(p, u)
             self._begin_draw(self._fbo("sample", [tgt]), tgt.size)
             ctx.disable(moderngl.BLEND)
-            gm.render(p, subset)
+            g.draw_quad(p) if view.uv_mapping is not None else gm.render(p, subset)
 
     # ------------------------------------------------------------------ stroke buffers
     def apply_paint(self, layer_tex: dict, snapshot: dict, buffers: list, stroke_opacity: float, erase: bool):
         """layer = snapshot (+) stroke buffer * stroke opacity, all seven channels at once."""
-        g, p = self.gpu, self.p_apply
+        g = self.gpu
+        keys = list(snapshot)
+        p = g.fs_program("apply_sparse_" + "".join(keys), channel_shader(S.STROKE_APPLY_FS, keys))
         units = {}
-        for i, k in enumerate(CH_KEYS):
-            units[f"u_s{i}"] = (i, snapshot[k])
-            units[f"u_k{i}"] = (7 + i, buffers[i])
+        for index, key in enumerate(keys):
+            channel = descriptor(key)
+            i = channel.index
+            units[f"u_s{i}"] = (i, snapshot[channel.key])
+            units[f"u_k{i}"] = (N_CH + i, buffers[index])
         g.bind(p, units)
         g.set(p, "u_so", float(stroke_opacity))
         g.set(p, "u_erase", int(erase))
-        targets = [layer_tex[k] for k in CH_KEYS]
+        targets = [layer_tex[key] for key in keys]
         self._begin_draw(self._fbo("apply", targets), targets[0].size)
         g.ctx.disable(moderngl.BLEND)
         g.draw_quad(p)
@@ -334,12 +383,15 @@ class Painter:
         g = self.gpu
         ctx = g.ctx
         if isinstance(target, dict):
-            p = self.p_paint
+            keys = [c.key for c in paint_channels(brush)]
+            if not keys:
+                return
+            p = g.program("fill_sparse_" + "".join(keys), S.UV_VS, channel_shader(S.BRUSH_PAINT_FS, keys))
             units = self._common(p, brush, view, None, None, gm.mesh.radius)
             units.update(self._projection_units(p, brush, view, False))
             self._paint_values(p, brush, erase)
             g.bind(p, units)
-            textures = [target[k] for k in CH_KEYS]
+            textures = [target[key] for key in keys]
             self._begin_draw(self._fbo("fill", textures), textures[0].size)
             ctx.enable(moderngl.BLEND)
             ctx.blend_equation = moderngl.FUNC_ADD
@@ -372,26 +424,54 @@ class Stroke:
         self.painter, self.gm, self.subset = painter, gm, subset
         self.brush = Brush()
         self.brush.load_dict(brush.to_dict())       # settings are frozen for the stroke
+        if view.uv_mapping is not None:
+            self.brush.alignment = 3
         self.view = view
         self.radius_fn = radius_fn
         self.target = target                         # "layer" | "mask" | "quick"
         self.textures = textures                     # dict key->tex (layer) or single texture
         self.quick = quick if target != "quick" else None
         self.mask_value = mask_value
-        self.rng = np.random.default_rng(seed)
+        self.seed = int(seed) % (2 ** 32)
+        self.rng = np.random.default_rng(self.seed)
         self.syms = symmetry_transforms(self.brush)
         b = self.brush
         self.tool = int(b.tool)
         self.erase = b.mode == 1
         self.direct = self.tool in (TOOL_SMUDGE, TOOL_CLONE)
+        if b.user_channel and target == "layer" and self.tool != TOOL_PAINT:
+            raise ValueError("User channel strokes support Paint and Erase; choose Paint")
         g = painter.gpu
+        # Admit the complete initial working set before lazy raster allocation.
+        # A late buffer-budget failure must not publish empty authored channels.
+        itemsize = {"f1": 1, "f2": 2, "f4": 4}
+        required = 0
         if target == "layer":
-            keys = list(CH_KEYS)
-            self.snapshot = {k: g.clone(textures[k]) for k in keys}
+            channels = paint_channels(b)
+            for channel in channels:
+                if channel.key in textures:
+                    texture = textures[channel.key]
+                    size, components, dtype = texture.size, texture.components, texture.dtype
+                else:
+                    size = (textures.resolution, textures.resolution)
+                    components, dtype = channel.paint_components, channel.paint_dtype
+                    required += size[0] * size[1] * components * itemsize[dtype]
+                required += size[0] * size[1] * components * itemsize[dtype]
+                if not self.direct:
+                    required += size[0] * size[1] * max(4, channel.paint_components) * itemsize[channel.paint_dtype]
+        else:
+            required = textures.size[0] * textures.size[1] * (textures.components * itemsize[textures.dtype] + (0 if self.direct else 2))
+        g.memory.check(required)
+        if target == "layer":
+            channels = paint_channels(b)
+            if hasattr(textures, "ensure"):
+                textures.ensure([c.key for c in channels])
+            self.snapshot = {channel.key: g.clone(textures[channel.key], purpose="stroke snapshot/" + channel.key) for channel in channels}
             if not self.direct:
-                size = textures["C"].size
-                self.buffers = [g.texture(size, CH_COMPONENTS[k] if CH_COMPONENTS[k] == 4 else 4, dtype="f2")
-                                for k in keys]
+                size = textures[channels[0].key].size
+                # Brush shader outputs remain vec4, including scalar value/coverage channels.
+                self.buffers = [g.texture(size, max(4, channel.paint_components), dtype=channel.paint_dtype, purpose="stroke buffer/" + channel.key)
+                                for channel in channels]
                 for t in self.buffers:
                     g.fill(t, (0, 0, 0, 0))
         else:
@@ -408,14 +488,31 @@ class Stroke:
         self.changed = False
         self.dabs = 0
         self.last_px = None
+        self.recorded_views, self.recorded_samples, self.recorded_dabs = [], [], []
+        self.started_at = time.monotonic()
+
+    def _record_view(self):
+        from .journal import view_record
+        view = view_record(self.view)
+        if not self.recorded_views or view != self.recorded_views[-1]:
+            self.recorded_views.append(view)
+        return len(self.recorded_views) - 1
+
+    def _record_sample(self, surface, event):
+        self.recorded_samples.append({"event": event, "seconds": time.monotonic() - self.started_at,
+                                      "view": self._record_view(), "position": np.asarray(surface.pos).tolist(),
+                                      "normal": np.asarray(surface.nrm).tolist(), "uv": np.asarray(surface.uv).tolist(),
+                                      "triangle": int(surface.tri), "pressure": float(surface.pressure)})
 
     # -- input
     def start(self, s: Surface):
+        self._record_sample(s, "start")
         self.lazy = s.pos.copy()
         self.last = s
         self._dab(s, None)
 
     def feed(self, s: Surface):
+        self._record_sample(s, "feed")
         b = self.brush
         if self.last is None:
             self.start(s)
@@ -493,6 +590,11 @@ class Stroke:
                     cam_angle += math.atan2(d[1], d[0])
         topo = self.gm.mesh.topology
         uvs = topo.uv_scale(s.tri) if 0 <= s.tri < topo.n_tris else 1.0
+        if v.uv_mapping is not None:
+            if b.follow_path and direction is not None and np.linalg.norm(direction[:2]) > 1e-9:
+                angle += math.atan2(direction[1], direction[0])
+            return Dab(hit=hit, radius=r, frame=(T, B, N), rot=(math.cos(angle), math.sin(angle)),
+                       hit_px=px, radius_px=rpx, hit_uv=hit[:2], radius_uv=r, flow=float(flow), occl=False)
         rot_a = cam_angle if b.alignment == 0 else angle
         return Dab(hit=hit, radius=r, frame=(T, B, N), rot=(math.cos(rot_a), math.sin(rot_a)),
                    hit_px=px, radius_px=rpx, hit_uv=np.asarray(s.uv, float), radius_uv=r / max(uvs, 1e-9),
@@ -501,6 +603,12 @@ class Stroke:
     def _dab(self, s: Surface, direction):
         d = self._make_dab(s, direction)
         copies = [d] + [Dab(**{**d.__dict__, "sym_inv": np.linalg.inv(S_), "occl": False}) for S_ in self.syms]
+        view_index = self._record_view()
+        for dab in copies:
+            values = {key: (value.tolist() if isinstance(value, np.ndarray) else
+                           [np.asarray(item).tolist() for item in value] if key == "frame" else value)
+                      for key, value in dab.__dict__.items()}
+            self.recorded_dabs.append({"view": view_index, "values": values})
         pt, b = self.painter, self.brush
         for dab in copies:
             if self.direct:
@@ -522,7 +630,7 @@ class Stroke:
     def _sample_targets(self):
         clone = self.tool == TOOL_CLONE
         if self.target == "layer":
-            keys = [k for i, k in enumerate(CH_KEYS) if self.brush.enabled[i]]
+            keys = [channel.key for channel in paint_channels(self.brush)]
             return ([self.textures[k] for k in keys],
                     [self.snapshot[k] if clone else None for k in keys])
         return [self.textures], [self.snapshot["mask"] if clone else None]

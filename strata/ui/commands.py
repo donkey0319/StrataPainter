@@ -130,7 +130,12 @@ class Registry:
             if msg and why:
                 msg(f"{c.name}: {why}")
             return False
-        c.run()
+        try:
+            c.run()
+        except MemoryError as error:
+            if msg:
+                msg(str(error))
+            return False
         return True
 
     def dispatch(self, io, msg=None):

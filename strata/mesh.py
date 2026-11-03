@@ -522,6 +522,9 @@ def load_obj(path: str, xform=None, light=False, require_uvs=True) -> Mesh:
         if require_uvs:
             raise ValueError("This mesh has no UVs - unwrap it before texturing.")
         vts = [(0.0, 0.0)]
+    missing = [index for index, face in enumerate(faces) if any(corner[1] == 0 for corner in face[:3])]
+    if missing and require_uvs:
+        raise ValueError(f"{len(missing)} faces have missing UVs; enable automatic UV preparation or unwrap them externally")
     vs, vts = np.array(vs, np.float32), np.array(vts, np.float32)
     vns = np.array(vns, np.float32) if vns else None
 
@@ -555,6 +558,7 @@ def load_obj(path: str, xform=None, light=False, require_uvs=True) -> Mesh:
         Nn = compute_vertex_normals(P, I)
     name = os.path.splitext(os.path.basename(path))[0]
     return Mesh(name, P, Nn, T, I, parts=PM, tri_material=np.array(TM, np.int32),
+                extra={"uv_missing_triangles": missing} if missing else {},
                 material_names=mat_names, part_names=part_names).finalize(normalize_size=True, xform=xform, light=light)
 
 
@@ -578,12 +582,13 @@ def load_with_assimp(path: str, xform=None, light=False, require_uvs=True) -> Me
                     nm = str(v); break
         mat_names.append(nm or f"Material {i}")
     base = 0
+    missing = []
     for m in scene.meshes:
         if len(m.indices) == 0:
             continue
         has_uv = bool(m.texcoords) and len(m.texcoords[0]) > 0
         if not has_uv and require_uvs:
-            continue
+            raise ValueError("UVs missing on part " + str(getattr(m, "name", "")) + "; enable automatic UV preparation to retain all geometry")
         pos = np.asarray(m.vertices, np.float32).reshape(-1, 3)
         nrm = np.asarray(m.normals, np.float32).reshape(-1, 3)
         ncomp = getattr(m, "num_uv_components", 2)
@@ -593,6 +598,9 @@ def load_with_assimp(path: str, xform=None, light=False, require_uvs=True) -> Me
         uv = np.asarray(m.texcoords[0], np.float32).reshape(-1, ncomp)[:, :2] if has_uv \
             else np.zeros((len(pos), 2), np.float32)
         idx = np.asarray(m.indices, np.uint32).reshape(-1, 3)
+        if not has_uv:
+            offset = sum(len(part) for part in I)
+            missing.extend(range(offset, offset + len(idx)))
         if len(nrm) != len(pos):
             nrm = compute_vertex_normals(pos, idx)
         src_mat = int(getattr(m, "material_index", 0) or 0)
@@ -616,5 +624,6 @@ def load_with_assimp(path: str, xform=None, light=False, require_uvs=True) -> Me
              for s, _ in sorted(mat_ids.items(), key=lambda kv: kv[1])]
     return Mesh(name, np.concatenate(P), np.concatenate(N), np.concatenate(T),
                 np.concatenate(I), parts=np.concatenate(PM), colors=np.concatenate(C),
+                extra={"uv_missing_triangles": missing} if missing else {},
                 tri_material=np.concatenate(TM), material_names=names,
                 part_names=part_names).finalize(normalize_size=True, xform=xform, light=light)

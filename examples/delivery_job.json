@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "steps": [
+    {"command": "project.new", "params": {"mesh": "Canister", "resolution": 256, "source_unit": "m", "tangent_basis": "mikk", "ao_samples": 16}},
+    {"command": "layer.add", "params": {"kind": "fill", "name": "Delivery finish"}},
+    {"command": "layer.configure", "params": {"values": {"color": [0.7, 0.2, 0.08], "rough": 0.3, "metal": 0.6}}},
+    {"command": "project.save", "params": {"path": "../export/reference.strata", "portable": true}},
+    {"command": "delivery.blender", "params": {"path": "../export/reference.zip"}},
+    {"command": "delivery.glb", "params": {"path": "../export/reference.glb"}}
+  ]
+}

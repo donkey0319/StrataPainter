@@ -12,8 +12,8 @@ on the surface and fed to a strata.painter.Stroke built with that camera, so spa
 back-face falloff, seam wrapping and stroke opacity behave exactly like a live Strata stroke.
 2D strokes paint UV-aligned dabs at the surface point under each UV sample.
 
-Brush tips (alphas), jitter and symmetry of the original brush are not reproduced: dabs are round
-with the recorded hardness, size, flow, spacing and pressure response.
+Embedded bitmap alphas and explicitly named emitter jitter fields are retained.
+Unvalidated symmetry and proprietary procedural tips remain reportable approximations.
 """
 from __future__ import annotations
 
@@ -67,14 +67,37 @@ class _UVStroke(Stroke):
 
     def _make_dab(self, s, direction):
         d = super()._make_dab(s, direction)
-        d.radius_uv = self.uv_radius
+        d.radius_uv = self.uv_radius * d.radius / max(self.radius_fn(s.pos,s.tri),1e-9)
         d.radius = self.gm.mesh.radius * 4.0          # don't cull texels by 3D distance
         d.occl = False
         return d
 
 
+    def feed(self,s):
+        # UV source samples form one continuous path even across world-space seams.
+        self._record_sample(s,"feed")
+        if self.last is None:
+            self.start(s)
+            return
+        last=self.last;distance=float(np.linalg.norm(s.uv-last.uv));b=self.brush
+        pressure=(b.min_size+(1-b.min_size)*s.pressure) if b.pressure_size else 1.
+        step=max(b.spacing*self.uv_radius*pressure*2,1e-6)
+        t=step-self.carry
+        while t<=distance:
+            f=t/max(distance,1e-12)
+            sample=Surface(last.pos+(s.pos-last.pos)*f,normalize(last.nrm*(1-f)+s.nrm*f),
+                           last.uv+(s.uv-last.uv)*f,s.tri,last.pressure*(1-f)+s.pressure*f)
+            self._dab(sample,s.pos-last.pos)
+            t+=step
+        self.carry=distance-(t-step);self.last=s
+
+
+class ReplayPause(Exception):
+    pass
+
+
 class Replayer:
-    def __init__(self, engine, ts=None, max_dabs=MAX_DABS_TOTAL, progress=None):
+    def __init__(self, engine, ts=None, max_dabs=MAX_DABS_TOTAL, progress=None, seed_offset=0):
         self.e = engine
         self.ts = ts or engine.ts
         self.dabs = 0
@@ -82,6 +105,10 @@ class Replayer:
         self.truncated = False
         self.max_dabs = max_dabs
         self.progress = progress
+        self.seed_offset = seed_offset
+        self.cancelled = False
+        self.complete = True
+        self.next_cursor = (0, 0)
         self._cam_key = None
         self._cam = None
         self._uvmaps = None
@@ -125,6 +152,8 @@ class Replayer:
         if job.opac is not None:
             b.opac = float(job.opac)
         b.mask_value = float(np.clip(job.mask_value if job.mask_value is not None else 1.0, 0, 1))
+        for key in ("alpha", "size_jitter", "flow_jitter", "angle_jitter", "pos_jitter"):
+            if key in job.brush and job.brush[key] is not None:setattr(b,key,job.brush[key])
         b.target = 0
         return b
 
@@ -176,39 +205,54 @@ class Replayer:
         return lambda p, tri: r
 
     # -------------------------------------------------------------- replay
-    def replay(self, lay, jobs, target_mask=False, budget=MAX_DABS_PER_LAYER):
-        """Paint every stroke of `jobs` (convert.PaintJob) into layer `lay`. Returns dabs painted."""
-        total_keys = sum(len(s.get("points") or []) for j in jobs for s in j.strokes)
-        stride = max(1, int(math.ceil(total_keys / max(budget, 1))))
+    def replay(self, lay, jobs, target_mask=False, budget=MAX_DABS_PER_LAYER, cursor=(0,0)):
+        """Replay whole strokes without decimation; pause before publishing a partial stroke."""
         n0 = self.dabs
-        for job in jobs:
-            for s in job.strokes:
-                if self._full():
-                    break
-                if self.progress is not None:
-                    self.progress(self.dabs)
-                pts = _points(s)
-                if len(pts) == 0:
+        limit = min(self.max_dabs,self.dabs+budget)
+        self.complete = True
+        for ji,job in enumerate(jobs):
+            for si,stroke in enumerate(job.strokes):
+                if (ji,si)<tuple(cursor):continue
+                self.next_cursor=(ji,si)
+                if self.progress is not None and self.progress(self.dabs) is False:
+                    self.cancelled,self.complete=True,False
+                    return self.dabs-n0
+                self._limit=limit
+                pts=_points(stroke)
+                if len(pts)==0:
+                    self.skipped+=1
                     continue
-                vt = int(val(s.get("viewType"), 1))
-                V, P = _mat(s.get("viewMatrix")), _mat(s.get("projectionMatrix"))
-                if vt == 1 and V is not None and P is not None:
-                    self._stroke_3d(lay, job, s, pts, V, P, target_mask, stride)
-                else:
-                    self._stroke_uv(lay, job, s, pts, target_mask, stride)
-        self.e.dirty = True
-        return self.dabs - n0
+                vt=int(val(stroke.get("viewType"),1))
+                V,P=_mat(stroke.get("viewMatrix")),_mat(stroke.get("projectionMatrix"))
+                try:
+                    if vt==1:
+                        if V is None or P is None:self.skipped+=1
+                        else:self._stroke_3d(lay,job,stroke,pts,V,P,target_mask,1)
+                    else:self._stroke_uv(lay,job,stroke,pts,target_mask,1)
+                except ReplayPause:
+                    self.complete=False
+                    return self.dabs-n0
+        self.next_cursor=(len(jobs),0)
+        self.e.dirty=True
+        return self.dabs-n0
 
     def _run(self, stroke, surfaces):
-        stroke.start(surfaces[0])
-        for sf in surfaces[1:]:
-            if self.dabs + stroke.dabs >= self.max_dabs:
-                self.truncated = True
-                break
-            stroke.feed(sf)
-        stroke.apply()
-        self.dabs += stroke.dabs
-        stroke.release()
+        original=stroke._dab
+        def dab(surface,direction):
+            if self.dabs+stroke.dabs>=self._limit:
+                self.truncated=True
+                raise ReplayPause()
+            if stroke.dabs%64==0 and self.progress is not None and self.progress(self.dabs+stroke.dabs) is False:
+                self.cancelled=True
+                raise ReplayPause()
+            return original(surface,direction)
+        stroke._dab=dab
+        try:
+            stroke.start(surfaces[0])
+            for sf in surfaces[1:]:stroke.feed(sf)
+            stroke.apply()
+            self.dabs+=stroke.dabs
+        finally:stroke.release()
 
     def _new_stroke(self, cls, lay, job, view, radius_fn, target_mask, uv=False):
         e = self.e
@@ -218,7 +262,7 @@ class Replayer:
         else:
             target, textures = "layer", lay.tex
         return cls(e.painter, e.gm, self.ts.key, b, view, radius_fn, target, textures, quick=None,
-                   mask_value=b.mask_value, seed=self.dabs * 31 + 7)
+                   mask_value=b.mask_value, seed=(self.seed_offset+self.dabs) * 31 + 7)
 
     def _stroke_3d(self, lay, job, stroke, pts, V, P, target_mask, stride):
         view, pos, nrm, uvt, eye, P, ortho = self._camera(V, P)

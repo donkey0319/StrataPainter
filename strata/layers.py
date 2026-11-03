@@ -8,16 +8,15 @@ from __future__ import annotations
 import copy
 import itertools
 import random
+import uuid
 from dataclasses import dataclass, field, asdict, fields
 from typing import Optional
 
 # ---------------------------------------------------------------------------------- channels
 # Display names (index-aligned with Layer.enabled / Brush.enabled / chan_blend / chan_opacity)
-CHANNELS = ["Color", "Rough", "Metal", "Height", "Normal", "Emissive", "Opacity"]
-CH_KEYS = ["C", "R", "M", "H", "N", "E", "O"]          # paint-texture keys, same order
-CH_COMPONENTS = {"C": 4, "R": 2, "M": 2, "H": 2, "N": 4, "E": 4, "O": 2}
-N_CH = len(CHANNELS)
-DEFAULT_ENABLED = [True, True, True, True, False, False, False]
+from .channels import (CHANNELS, CH_KEYS, CH_COMPONENTS, N_CH, channel_default,
+                       enabled_defaults)
+DEFAULT_ENABLED = enabled_defaults("layer")
 
 # ---------------------------------------------------------------------------------- blend modes
 # The first five keep their old indices so existing projects load unchanged.
@@ -86,14 +85,18 @@ class Projection:
     rotation: float = 0.0         # degrees
     sharpness: float = 4.0        # tri-planar blend sharpness
     axis: int = 1                 # planar / cylindrical axis
+    repeat_meters: float = 0.0     # planar/tri-planar physical period; zero uses ordinary scale
+    warp: list | None = None      # four destination UV corners
+    decal: bool = False           # clip the projection outside its unit square
 
 
 # effect kinds: mask-side and content-side
 MASK_EFFECTS = ["fill", "generator", "levels", "invert", "blur", "color_select", "anchor",
-                "mesh_map", "threshold"]
-CONTENT_EFFECTS = ["hsl", "levels", "invert", "blur", "brightness_contrast", "anchor"]
+                "mesh_map", "threshold", "paint", "graph"]
+CONTENT_EFFECTS = ["hsl", "levels", "invert", "blur", "brightness_contrast", "anchor", "graph"]
 
 EFFECT_DEFAULTS = {
+    "paint":      {"initial": 0.0},
     "fill":       {"value": 1.0, "map": None, "proj": None},
     "generator":  {"gen": None},
     "levels":     {"in_lo": 0.0, "in_hi": 1.0, "gamma": 1.0, "out_lo": 0.0, "out_hi": 1.0, "channel": 0},
@@ -123,6 +126,7 @@ class Effect:
     params: dict = field(default_factory=dict)
     name: str = ""
     uid: int = field(default_factory=_uid)
+    pid: str = field(default_factory=lambda: uuid.uuid4().hex)
     tex: object = field(default=None, repr=False, compare=False)   # optional GPU resource
 
     def __post_init__(self):
@@ -139,6 +143,12 @@ class Effect:
             p = base.get("proj")
             if isinstance(p, dict):
                 base["proj"] = Projection(**{k: v for k, v in p.items() if k in Projection.__dataclass_fields__})
+        if self.kind == "graph":
+            from .graphs import preset, validate
+            base.setdefault("graph", preset())
+            base.setdefault("channel", 0)
+            validate(base["graph"])
+            if type(base["channel"]) is not int or not 0<=base["channel"]<N_CH:raise ValueError("Native graph requires one channel")
         self.params = base
         if not self.name:
             self.name = self.kind.replace("_", " ").title()
@@ -147,13 +157,17 @@ class Effect:
         p = {}
         for k, v in self.params.items():
             p[k] = asdict(v) if isinstance(v, (MaskGen, Projection)) else copy.deepcopy(v)
+            if isinstance(v,Projection):
+                if v.warp is None:p[k].pop("warp",None)
+                if not v.decal:p[k].pop("decal",None)
         return {"kind": self.kind, "enabled": self.enabled, "blend": self.blend,
-                "opacity": self.opacity, "params": p, "name": self.name}
+                "opacity": self.opacity, "params": p, "name": self.name, "pid": self.pid}
 
     @staticmethod
     def from_dict(d: dict) -> "Effect":
         return Effect(kind=d["kind"], enabled=d.get("enabled", True), blend=d.get("blend", 0),
-                      opacity=d.get("opacity", 1.0), params=d.get("params", {}), name=d.get("name", ""))
+                      opacity=d.get("opacity", 1.0), params=d.get("params", {}), name=d.get("name", ""),
+                      pid=d.get("pid") or uuid.uuid4().hex)
 
 
 # ---------------------------------------------------------------------------------- layer
@@ -169,14 +183,14 @@ class Layer:
     opacity: float = 1.0
     blend: int = 0                     # colour-style channels (Color, Emissive) unless chan_blend overrides
     hblend: int = 0                    # legacy height blend: 0 Normal, 1 Add
-    color: list = field(default_factory=lambda: [0.5, 0.5, 0.5])
-    rough: float = 0.5
-    metal: float = 0.0
-    height: float = 0.5
-    normal: list = field(default_factory=lambda: [0.5, 0.5, 1.0])     # encoded tangent-space normal
-    emissive: list = field(default_factory=lambda: [0.0, 0.0, 0.0])
-    opac: float = 1.0                  # Opacity channel value (not layer opacity)
-    enabled: list = field(default_factory=lambda: list(DEFAULT_ENABLED))
+    color: list = field(default_factory=lambda: channel_default("C", "layer"))
+    rough: float = channel_default("R", "layer")
+    metal: float = channel_default("M", "layer")
+    height: float = channel_default("H", "layer")
+    normal: list = field(default_factory=lambda: channel_default("N", "layer"))
+    emissive: list = field(default_factory=lambda: channel_default("E", "layer"))
+    opac: float = channel_default("O", "layer")
+    enabled: list = field(default_factory=lambda: enabled_defaults("layer"))
     chan_blend: list = field(default_factory=lambda: [-1] * N_CH)     # -1 = default for that channel
     chan_opacity: list = field(default_factory=lambda: [1.0] * N_CH)
     variation: float = 0.0             # fill: colour/roughness noise
@@ -184,6 +198,8 @@ class Layer:
     var_scale: float = 1.0
     seed: float = field(default_factory=lambda: random.random())
     maps: dict = field(default_factory=dict)          # fill: channel key -> image path
+    user_channels: dict = field(default_factory=dict)
+    authored: dict | None = None  # persistent surface path/ribbon/region or font text
     proj: Projection = field(default_factory=Projection)
     has_mask: bool = False
     mask_enabled: bool = True          # Shift+click on the mask thumbnail: bypass the whole mask stack
@@ -193,7 +209,9 @@ class Layer:
     part_mask: Optional[list] = None                  # geometry mask: mesh part ids to keep (None = all)
     children: list = field(default_factory=list)      # group layers, bottom first
     expanded: bool = True
+    raster_res: Optional[int] = None  # canonical shared raster; each set owns evaluated outputs
     uid: int = field(default_factory=_uid)
+    pid: str = field(default_factory=lambda: uuid.uuid4().hex)
     # GPU resources (not serialised)
     tex: Optional[dict] = field(default=None, repr=False, compare=False)   # paint: C,R,M,H,N,E,O
     mask_tex: object = field(default=None, repr=False, compare=False)
@@ -240,8 +258,16 @@ class Layer:
     # -- serialisation
     def to_dict(self) -> dict:
         d = {k: copy.deepcopy(getattr(self, k)) for k in self.__dataclass_fields__ if k not in _SKIP}
+        if not d.get("user_channels"):d.pop("user_channels", None)
+        if d.get("authored") is None:d.pop("authored",None)
+        if d.get("raster_res") is None:
+            d.pop("raster_res", None)
         d["gen"] = asdict(self.gen)
         d["proj"] = asdict(self.proj)
+        if self.proj.warp is None:d["proj"].pop("warp",None)
+        if not self.proj.decal:d["proj"].pop("decal",None)
+        if not self.proj.repeat_meters:
+            d["proj"].pop("repeat_meters", None)
         d["color"] = [float(c) for c in self.color]
         d["enabled"] = [bool(e) for e in self.enabled]
         d["effects"] = [e.to_dict() for e in self.effects]
@@ -252,6 +278,8 @@ class Layer:
     @staticmethod
     def from_dict(d: dict) -> "Layer":
         d = dict(d)
+        if not d.get("pid"):
+            d.pop("pid", None)
         gen = MaskGen(**{k: v for k, v in d.pop("gen", {}).items() if k in MaskGen.__dataclass_fields__})
         proj = Projection(**{k: v for k, v in d.pop("proj", {}).items() if k in Projection.__dataclass_fields__})
         effects = [Effect.from_dict(e) for e in d.pop("effects", [])]
@@ -269,6 +297,69 @@ def group(name="Group", children=None, **kw) -> Layer:
     return lay
 
 
+def _evaluation_layers(layers):
+    """Yield in compositor order: children before their group's anchor capture."""
+    for layer in ([layers] if isinstance(layers, Layer) else layers):
+        yield from _evaluation_layers(layer.children)
+        yield layer
+
+
+def bind_anchor_references(layers):
+    """Migrate unique legacy anchor names; report unresolved evaluation dependencies.
+
+    Once bound, a reference uses its source effect's persistent ID exclusively. Names
+    remain editable labels and never silently redirect an existing reference.
+    """
+    ordered = list(_evaluation_layers(layers))
+    definitions, names, diagnostics = {}, {}, []
+    for index, layer in enumerate(ordered):
+        for effect in layer.effects:
+            if effect.kind == "anchor" and effect.params.get("name"):
+                definitions.setdefault(effect.pid, (index, effect))
+                names.setdefault(effect.params["name"], []).append(effect.pid)
+    for index, layer in enumerate(ordered):
+        for effect in layer.mask_effects:
+            if effect.kind != "anchor":
+                continue
+            source = effect.params.get("source_pid")
+            label = effect.params.get("source") or effect.params.get("name") or "(unnamed)"
+            if not source:
+                matches = list(dict.fromkeys(names.get(label, [])))
+                if len(matches) == 1:
+                    source = effect.params["source_pid"] = matches[0]
+                else:
+                    diagnostics.append(f"Anchor {label!r}: {'ambiguous' if matches else 'missing'} source")
+                    continue
+            definition = definitions.get(source)
+            if definition is None:
+                diagnostics.append(f"Anchor {label!r}: missing source {source}")
+            elif definition[0] >= index:
+                diagnostics.append(f"Anchor {label!r}: forward or cyclic source")
+    return diagnostics
+
+
+def renew_persistent_ids(layers):
+    """Assign a copied forest new identities, remapping references within that forest."""
+    ordered = list(_evaluation_layers(layers))
+    objects, seen = [], set()
+    for layer in ordered:
+        for obj in [layer] + layer.effects + layer.mask_effects:
+            if id(obj) not in seen:
+                seen.add(id(obj))
+                objects.append(obj)
+    mapping = {}
+    for obj in objects:
+        old = obj.pid
+        obj.pid = uuid.uuid4().hex
+        mapping.setdefault(old, obj.pid)
+    for layer in ordered:
+        for effect in layer.effects + layer.mask_effects:
+            source = effect.params.get("source_pid")
+            if source in mapping:
+                effect.params["source_pid"] = mapping[source]
+    return layers
+
+
 # ---------------------------------------------------------------------------------- brush
 TOOLS = ["Paint", "Smudge", "Clone", "Projection"]     # Erase = Paint with mode 1
 ALIGNMENTS = ["Camera", "Tangent | Wrap", "Tangent | Planar", "UV"]
@@ -279,20 +370,22 @@ STENCIL_TILING = ["None", "Horizontal", "Vertical", "Both"]
 
 @dataclass
 class Brush:
+    user_channel: str | None = None
+    user_value: float = 1.0
     size_px: float = 60.0
     hardness: float = 0.5
     flow: float = 0.6
     spacing: float = 0.15              # fraction of the brush diameter between dabs
     grain: float = 0.0
     grain_scale: float = 40.0
-    color: list = field(default_factory=lambda: [0.75, 0.2, 0.12])
-    rough: float = 0.45
-    metal: float = 0.0
-    height: float = 0.65
-    normal: list = field(default_factory=lambda: [0.5, 0.5, 1.0])
-    emissive: list = field(default_factory=lambda: [1.0, 0.6, 0.2])
-    opac: float = 1.0
-    enabled: list = field(default_factory=lambda: list(DEFAULT_ENABLED[:3]) + [False, False, False, False])
+    color: list = field(default_factory=lambda: channel_default("C", "brush"))
+    rough: float = channel_default("R", "brush")
+    metal: float = channel_default("M", "brush")
+    height: float = channel_default("H", "brush")
+    normal: list = field(default_factory=lambda: channel_default("N", "brush"))
+    emissive: list = field(default_factory=lambda: channel_default("E", "brush"))
+    opac: float = channel_default("O", "brush")
+    enabled: list = field(default_factory=lambda: enabled_defaults("brush"))
     mode: int = 0          # 0 paint 1 erase
     target: int = 0        # 0 layer 1 mask 2 quick mask
     mask_value: float = 1.0
@@ -301,6 +394,7 @@ class Brush:
     stroke_opacity: float = 1.0
     angle: float = 0.0                 # degrees
     follow_path: bool = False
+    seed: int = 17                    # deterministic jitter, independent of undo-history length
     size_jitter: float = 0.0
     flow_jitter: float = 0.0
     angle_jitter: float = 0.0

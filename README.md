@@ -4,18 +4,141 @@ A small 3D texture painter written from scratch in Python + OpenGL. It covers th
 Substance-Painter-style loop: bake mesh maps, stack fill and paint layers with masks and
 generators, paint directly on the model in 3D, and export PBR maps for Unreal or Unity.
 
-## Run
+## Install and launch Strata Painter
 
-Python 3.10+ (on Windows, use native Windows Python rather than WSL for the best GL drivers).
+Strata currently runs from source. You need **Python 3.10 or newer**, a GPU and driver
+that support **OpenGL 3.3**, and an internet connection for the initial dependency install.
+Launchers are provided for Windows, macOS and Linux. Windows is the locally verified
+platform; the macOS/Linux launchers do not yet have native GPU/UI runtime verification.
 
+Download this repository using **Code > Download ZIP** on GitHub and extract it, or
+clone it with Git. Keep the complete folder together, including `run.py`, `strata/`,
+and `requirements.txt`. Run the launcher for your operating system below.
+
+### Windows: launch with a double-click
+
+1. Install native Windows Python 3.10+ and enable **Add python.exe to PATH** in the
+   installer. Use Windows Python rather than WSL for the desktop app.
+2. Open the extracted or cloned folder containing `Strata.bat`, `run.py`, and
+   `requirements.txt`.
+3. Double-click **`Strata.bat`**. On the first launch, it creates a local `.venv`
+   Python environment and installs the dependencies. Keep the console window open
+   while setup finishes; the Strata window then opens with a Rounded Cube.
+
+For future launches, double-click `Strata.bat` again. You can create a desktop
+shortcut to that file for convenience. Use **File > Open** to open a saved `.strata`
+project, or **File > New Project > From file** to start painting your own mesh.
+
+To launch from PowerShell, open a terminal in the repository folder and run:
+
+```powershell
+.\Strata.bat
+.\Strata.bat "C:\Projects\my.strata"   # open a saved project
+.\Strata.bat "C:\Projects\painter.spp" # import a Substance 3D Painter project
 ```
-pip install -r requirements.txt
-python run.py                 # starts with a Rounded Cube
-python run.py my.strata       # open a saved project
-python run.py painter.spp     # import a Substance 3D Painter project
+
+### macOS
+
+Install Python 3.10+ with `python3` available in Terminal. Open Terminal, change to
+the extracted or cloned repository folder (replace the example path), and run:
+
+```sh
+cd "/path/to/strata"
+bash Strata.command
 ```
 
-Needs an OpenGL 3.3 capable GPU. First bake at 2048 takes about a second on a real GPU.
+The launcher creates `.venv`, installs dependencies on first launch, and opens the
+app. Later launches reuse that environment; changes to `requirements.txt` trigger
+a dependency update. To enable launching from Finder, run this once in the same folder:
+
+```sh
+chmod +x Strata.command Strata.sh
+```
+
+Then double-click **`Strata.command`** in Finder. Keep the Terminal window open
+while using Strata. If macOS blocks opening the downloaded launcher, use the
+Terminal command above to see its output.
+
+### Linux
+
+Install Python 3.10+ with pip and venv support, and use a graphical desktop session
+with OpenGL 3.3 drivers. On Debian/Ubuntu, the Python setup packages are:
+
+```sh
+sudo apt install python3 python3-pip python3-venv
+```
+
+Use equivalent packages on other distributions. From a terminal, change to the
+repository folder and launch:
+
+```sh
+cd "/path/to/strata"
+bash Strata.sh
+```
+
+The launcher creates `.venv` and installs dependencies automatically, reusing it
+on later launches and updating dependencies when `requirements.txt` changes.
+You can also run `chmod +x Strata.sh` once, then launch with `./Strata.sh`.
+
+Both Unix launchers accept project paths (quote paths containing spaces):
+
+```sh
+bash Strata.sh "/home/you/Projects/my.strata"             # Linux
+bash Strata.command "/Users/you/Projects/painter.spp"     # macOS
+```
+
+### Manual setup (all platforms)
+
+If you prefer to install dependencies yourself, open PowerShell in the repository
+folder and run:
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe run.py
+```
+
+These commands use the virtual environment directly, so PowerShell script activation
+is not required. If `py` is unavailable, use `python` for the first command instead.
+For later launches, run only the last command. Append a quoted `.strata` or `.spp`
+file path to open it at startup.
+
+For Linux/macOS manual setup, run these commands from the repository folder in a
+terminal:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python run.py
+```
+
+### Launch troubleshooting and optional features
+
+- **Python cannot be found:** install Python 3.10+ with PATH enabled, then reopen
+  your terminal and rerun your platform's launcher.
+- **Permission denied on macOS/Linux:** use `bash Strata.command` or `bash Strata.sh`,
+  or set executable permissions with `chmod +x` as described above.
+- **Linux window-system library errors:** install your distribution's GLFW/OpenGL
+  runtime libraries and run from a graphical desktop session.
+- **Dependencies fail to install:** read the error in the launcher's console window.
+  You can retry the manual setup commands above to see the full installation output.
+- **The app exits or cannot create an OpenGL context:** check that your GPU supports
+  OpenGL 3.3 and install the appropriate graphics driver. On Windows, launch outside WSL.
+- **See startup errors directly:** run `.\.venv\Scripts\python.exe run.py` from
+  PowerShell, or `.venv/bin/python run.py` from a macOS/Linux terminal, in the
+  repository folder after installing dependencies.
+
+Managed color additionally uses `requirements-managed.txt` (OpenColorIO). After the
+base Windows setup, install it with
+`.\.venv\Scripts\python.exe -m pip install -r requirements-managed.txt`.
+On macOS/Linux, use `.venv/bin/python -m pip install -r requirements-managed.txt`;
+the managed-color runtime has only been qualified on Windows.
+Optional MikkTSpace/automatic UV preparation uses an installed Blender executable, selected
+with STRATA_BLENDER when necessary. See [color](docs/architecture/COLOR.md),
+[mesh revisions](docs/MESH_REVISIONS.md), and [UV preparation/scale](docs/UV_PREPARATION_SCALE.md)
+for qualified versions, workflows and limits.
 
 ## What's in it
 
@@ -23,10 +146,18 @@ Needs an OpenGL 3.3 capable GPU. First bake at 2048 takes about a second on a re
   (File > New Project > From file, or drag the file onto the window). Meshes need UVs in the 0-1 range.
 - **Bakes** (GPU, texture space): position, normal, curvature, ambient occlusion (96 directions), UV coverage.
 - **Layers**: fill layers (uniform material + procedural colour/roughness/height noise) and paint layers.
-  Blend modes (Normal, Multiply, Screen, Overlay, Add), separate height blend (Normal / Add), opacity,
-  per-channel enables for Color / Roughness / Metallic / Height.
+  Blend modes, separate height blend, layer opacity and per-channel blend/opacity/enables for Color,
+  Roughness, Metallic, Height, Normal, Emissive and Opacity.
+- **Fill materials**: seven bitmap slots with previews, load/relink, clear and imported-image selection.
+  UV, tri-planar, planar, spherical and cylindrical mapping with numeric controls and viewport translation,
+  rotation and scale. See the [fill-material guide](docs/FILL_MATERIALS.md).
+- **Editable objects**: surface paths, ribbons, filled regions and portable font labels.
+  Point/profile editing, typography, shared warp/decal controls and resolution regeneration.
+  See [authored objects and limits](docs/AUTHORED_OBJECTS.md).
 - **Masks**: paintable mask per layer, plus a generator: Edge Wear (curvature), Dirt/Cavity (AO + concavity),
   Ambient Occlusion, Upward Facing (dust), Height Gradient, Noise. Each has level, softness, noise breakup, invert.
+- **Effects**: ordered content/mask editors, stable anchors, independent paint rows between mask filters,
+  baked-ID color picking and geometry masks. See the [effects guide](docs/EFFECTS.md).
 - **Smart materials**: Worn Blue Paint on Steel, Worn Orange Paint on Iron, Rusty Iron, Aged Gold, Dusty Rubber,
   Glazed Ceramic (Chipped). These are just layer stacks you can then edit.
 - **3D brush**: projection painting with occlusion and back-face falloff, so strokes wrap across UV seams.
@@ -37,6 +168,31 @@ Needs an OpenGL 3.3 capable GPU. First bake at 2048 takes about a second on a re
 - **Export**: Unreal (BC, DirectX normal, ORM, height), Unity (Albedo, Normal, MetallicSmoothness, AO, Height),
   or separate maps. 16 px of padding around UV islands, 16-bit height.
 - **Substance 3D Painter files** (needs `h5py`): see below.
+
+## Project protection and texture delivery
+
+The Export dialog uses a shared output manifest for its preview and writer. Choose a stock or custom template,
+select texture sets and output maps, and configure packing, format, bit depth, size and padding. Multi-set
+filenames stay distinct; ambiguous names are rejected before writing. Outputs are staged before existing files
+are replaced. Larger exports regenerate supported native paint and procedural content;
+legacy raster bases and clone/smudge checkpoints are resampled. See [native paint operations](docs/PAINT_OPERATIONS.md).
+See [export behavior](docs/EXPORT.md).
+
+Native raster projects use v3/v4/v5, managed color uses v6, native paint journals use v7, and physical material repeat uses v8; earlier projects remain readable.
+Independent mask paint remains v4 when no native journal is present. **Save Portable Project** embeds referenced images,
+stencils, alphas, environments and file-based high-poly sources. Saves are atomic, with backups controlled in
+**Settings > Project protection**. The same settings control automatic recovery snapshots, which keep the
+project's unsaved status. **File > Recover Autosave** opens recovery snapshots; **Project Resources** lists
+dependencies and supports relinking. Opening a `.strata.bakN` file restores it as unsaved work for the original
+project. Saved bake caches preserve high-poly detail when source geometry is unavailable, with diagnostics;
+relink or clear unavailable sources before rebaking. See [persistence and recovery](docs/PERSISTENCE.md).
+
+The [implementation status](docs/IMPLEMENTATION_STATUS.md) records completed work, local verification and known
+test failures. The [agent implementation plan](docs/STRATA_PAINTER_IMPLEMENTATION_PLAN.md) describes remaining work.
+
+Texture-set settings can resize the selected set. Replacements are staged before the live set changes;
+failure preserves its pixels and history. A successful resize clears global undo history, as stated beside
+the Apply control, because old GPU snapshots have incompatible dimensions.
 
 ## Substance 3D Painter files
 
@@ -149,7 +305,7 @@ Everything happens in UV space on the GPU:
   texture with its world position attached. Texels within the brush radius (in 3D) get paint, if a picking
   buffer rendered from the camera confirms that point is actually visible. That's why strokes don't care where
   the UV seams are.
-- **Paint storage**: each paint layer keeps four textures (color, roughness, metallic, height), each storing a
+- **Paint storage**: each paint layer keeps seven textures (color, roughness, metallic, height, normal, emissive, opacity), each storing a
   premultiplied value plus coverage, so channels can be painted and erased independently with plain blending.
 - **Compositing**: the stack is evaluated bottom-up into ping-pong render targets, one full-screen pass per layer.
   Generators read the baked maps, so they evaluate at the same resolution as the paint.
@@ -170,10 +326,75 @@ python tests/ui_tour.py out             # screenshots of the main UI states (add
 python tests/substance_check.py         # read + convert every Painter smart material / mask / sample project found
 python tests/substance_check.py --render out    # ... and render some of them on the GPU
 python tests/substance_ui_check.py out [folder] [file.spp]   # Substance tab, smart masks, .spp import dialog
+python tests/identity_check.py          # persistent IDs and legacy anchor migration, CPU only
+python tests/transactions_check.py --gpu out  # actual undo/cancel, shared storage and resource pixels
+python tests/transaction_ui_check.py out      # real slider, Escape, multi-selection and display gestures
+python tests/channel_check.py --gpu out      # all seven channels through paint, save/reopen and export
+python tests/channel_ui_check.py out         # seven-channel controls and independent opacity gestures
+python tests/material_check.py --gpu out     # bitmap/projection authoring and failure-safe set resizing
+python tests/material_ui_check.py out        # assemble, edit, save/reopen and export an external PBR material
+python tests/effects_check.py --gpu out      # ordered paint effects, anchors, copies and archive storage
+python tests/effects_ui_check.py out         # effect editors, paint targeting, geometry and ID picking
+python tests/brush_check.py --gpu out        # pressure, seeded jitter, seam/backface and portable projection
+python tests/brush_ui_check.py out           # advanced brush controls, pressure routing and save/export
+python tests/uv_check.py --gpu out           # native UV tools, coordinates, overlap policy and diagnostics
+python tests/uv_ui_check.py out              # actual 2D/split/scaled gestures, mask persistence and export
+python tests/bake_controls_check.py --gpu out # bake rollback, external maps, native dependencies and display
+python tests/authored_check.py --gpu out # persistent paths/ribbons/regions, portable fonts and projective decals
+python tests/authored_ui_check.py out    # actual point placement, label editing and shared warp gestures
+python tests/procedural_import_check.py --gpu out # native graphs, source metadata and resumable import replay
+python tests/procedural_import_ui_check.py out    # actual graph editor and import continuation controls
+python tests/substance_compatibility.py out --render # curated available Painter fixtures and native references
+python tests/advanced_bake_check.py --gpu out # named pairing, cages, sampling and painted correction fields
+python tests/advanced_bake_ui_check.py out    # actual source controls, correction paint and portable reopen
+python tests/bake_ui_check.py out             # native shelf, high-poly bake, environment and portable delivery
+python tests/memory_check.py --gpu out         # sparse storage, region undo, budgets and canonical instances
+python tests/memory_ui_check.py out            # real budget controls and graceful viewport allocation failure
 ```
 
 ## Known limits
 
-- One texture set (UDIMs and multiple materials per mesh aren't supported).
-- No layer folders, no stencils/alphas for the brush, no symmetry yet.
-- Undo keeps GPU copies of the layer being painted; 24 steps max.
+- Multiple material-based texture sets and layer folders are supported. Materials can own UDIM tiles with cached 3D/2D views, live surface/UV paint/erase/masks/projection, height-normal edge continuity, polygon fill, independent duplication, image sequences and atomic delivery. T14's authored-layout workflow is verified locally; advanced tool, instancing, topology and workload limits are explicit in [tile acceptance](docs/architecture/T14_ACCEPTANCE.md).
+- Advanced brush controls, stencils, mirror/radial symmetry and effect editors are available.
+  Windows Ink pressure capture is implemented; physical tablet hardware remains unverified.
+  Linux/macOS and legacy WinTab devices use mouse pressure 1.0. See [brush qualification](docs/BRUSHES.md).
+- High-poly baking, external mesh maps, environment controls and the portable native shelf are available; see [qualification](docs/BAKE_DISPLAY_LIBRARY.md). Named pairing, custom cages and painted ray/distance correction are qualified in [advanced baking](docs/ADVANCED_BAKING.md).
+- Interactive 2D painting supports paint/erase, masks, projection, clone and smudge; see [UV painting](docs/UV_PAINTING.md) for tool limits.
+- Managed OCIO, native journals, bounded mesh revisions and automatic UV preparation
+  are qualified locally. The [UV preparation controls](docs/UV_PREPARATION_SCALE.md)
+  support a 1–64-page UDIM budget with fixed valid UVs and angle-seam chart allocation.
+  Arbitrary topology preservation and changed-layout tiled reimport remain outside
+  the qualified scope. User scalar channels and shader workflows are documented below.
+- Imported Substance procedural content and brush strokes can be approximated; file-read success is not visual equivalence.
+- Paint history stores changed GPU regions and has configurable byte/step limits; see [memory qualification](docs/MEMORY.md).
+
+
+User channels and shaders: **Layer > Channels and shaders** creates paintable
+scalar channels and arbitrary-component export templates. Bind independent linear
+specular F0 RGB/glossiness and optional clearcoat, or inspect physical vertex
+displacement on a mesh with declared source units. See
+[workflow contracts and qualification](docs/SHADER_WORKFLOWS.md).
+
+
+**File > Deliver mesh and materials** writes portable Blender bundles or real
+mesh/material GLB files. Blender is the qualified target; see
+[delivery conventions and limits](docs/DELIVERY.md). Source batch and optional
+Cycles entry points share the native engine:
+
+```powershell
+python -m strata commands
+python -m strata batch examples/delivery_job.json
+python -m strata render export/reference.zip export/render.png --size 512 --samples 32
+```
+
+The sample declares meter source units and uses installed Blender for MikkTSpace.
+See [extension and batch API v1](docs/EXTENSIONS.md) for job paths, explicit plugin
+loading and failure behavior. Particle simulation brushes and Unreal/Unity setup
+integrations remain unclaimed. Frozen delivery builds have not been qualified.
+
+
+Local qualification and release readiness are tracked separately. See
+[validation lanes and reproducible evidence](docs/VALIDATION.md) and
+[release/manual gates](docs/RELEASE_GATES.md). The test suite and generated evidence
+remain local and ignored; public CI checks source syntax only. Physical tablet,
+other-platform runtime and frozen-package claims require their own qualification.

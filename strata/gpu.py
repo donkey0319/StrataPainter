@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import moderngl
 import numpy as np
+import weakref
 
 from . import shaders as S
 from .mesh import Mesh, VERTEX_FORMAT, VERTEX_ATTRS
+from .memory import MemoryBudget
 
 _NP = {"f2": np.float16, "f4": np.float32, "f1": np.uint8}
 
@@ -15,6 +17,7 @@ class GPU:
 
     def __init__(self, ctx: moderngl.Context):
         self.ctx = ctx
+        self.memory = MemoryBudget()
         self._programs = {}
         quad = np.array([-1, -1, 1, -1, -1, 1, 1, 1], np.float32)
         self.quad_vbo = ctx.buffer(quad.tobytes())
@@ -57,7 +60,7 @@ class GPU:
                 tex.use(unit)
 
     # -- textures -----------------------------------------------------------------
-    def texture(self, size, comps, data=None, dtype="f2", filt=True, repeat=False) -> moderngl.Texture:
+    def texture(self, size, comps, data=None, dtype="f2", filt=True, repeat=False, purpose="texture") -> moderngl.Texture:
         if data is not None and not isinstance(data, (bytes, bytearray)):
             arr = np.asarray(data)
             if arr.size == comps:  # constant fill
@@ -65,13 +68,28 @@ class GPU:
             if dtype == "f1" and arr.dtype != np.uint8:
                 arr = np.clip(arr, 0, 1) * 255 + 0.5
             data = np.ascontiguousarray(arr, _NP[dtype]).tobytes()
-        t = self.ctx.texture(size, comps, data=data, dtype=dtype)
+        token = self.memory.reserve(int(size[0]) * int(size[1]) * comps * np.dtype(_NP[dtype]).itemsize, purpose)
+        try:
+            t = self.ctx.texture(size, comps, data=data, dtype=dtype)
+        except Exception:
+            self.memory.release(token)
+            raise
+        reference = weakref.ref(t)
+        memory = self.memory
+        native_release = type(t).release
+        finalizer = weakref.finalize(t, memory.release, token)
+        def release():
+            texture = reference()
+            if texture is not None and finalizer.alive:
+                native_release(texture)
+                finalizer()
+        t.release = release
         t.filter = (moderngl.LINEAR, moderngl.LINEAR) if filt else (moderngl.NEAREST, moderngl.NEAREST)
         t.repeat_x = t.repeat_y = bool(repeat)
         return t
 
-    def clone(self, tex: moderngl.Texture) -> moderngl.Texture:
-        t = self.texture(tex.size, tex.components, dtype=tex.dtype)
+    def clone(self, tex: moderngl.Texture, purpose="snapshot") -> moderngl.Texture:
+        t = self.texture(tex.size, tex.components, dtype=tex.dtype, purpose=purpose)
         self.blit(tex, t)
         return t
 
@@ -109,7 +127,7 @@ class GPU:
         k = (key, tuple(size), comps, dtype)
         t = self._scratch.get(k)
         if t is None:
-            t = self._scratch[k] = self.texture(size, comps, dtype=dtype)
+            t = self._scratch[k] = self.texture(size, comps, dtype=dtype, purpose="scratch/" + key)
         return t
 
     def release_scratch(self):

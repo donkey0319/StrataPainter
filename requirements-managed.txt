@@ -1,0 +1,3 @@
+# Optional managed-color runtime; legacy projects do not require it.
+# Qualified Windows CPython 3.13 wheel; API/config provenance recorded in projects.
+opencolorio==2.6.0

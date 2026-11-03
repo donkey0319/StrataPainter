@@ -1,0 +1,5 @@
+"""Console entry point for source or PyInstaller batch builds."""
+from strata.cli import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

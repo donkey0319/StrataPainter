@@ -43,20 +43,33 @@ def _build(engine, ts, il: ImportedLayer, pending: list) -> Layer:
     return lay
 
 
-def _replay(engine, ts, pending, stats: ReplayStats, progress=None, max_dabs=MAX_DABS_TOTAL):
-    if not pending:
-        return
-    rp = Replayer(engine, ts, max_dabs=max(max_dabs - stats.dabs, 0), progress=progress)
-    for lay, jobs, to_mask in pending:
-        rp.replay(lay, jobs, target_mask=to_mask, budget=MAX_DABS_PER_LAYER)
-    stats.add(rp)
+def _begin_replay(engine, pending, report=None, progress=None, max_dabs=MAX_DABS_TOTAL, per_layer=MAX_DABS_PER_LAYER):
+    from . import session
+    if report:
+        engine.import_reports.append(copy.deepcopy(report))
+    engine.import_state=session.create(engine,pending)
+    session.resume(engine,max_dabs,per_layer,progress)
+
+
+def _budgets(total,per_layer):
+    if type(total) is not int or total<1 or type(per_layer) is not int or per_layer<1:
+        raise ValueError("Replay budgets must be positive integers")
+
+
+def _guard(engine):
+    if engine.import_state and engine.import_state["status"]!="complete":
+        raise ValueError("Finish or explicitly discard the pending import continuation before importing more content")
+    if engine.ts is not None and engine.ts.tiles is not None:
+        raise ValueError("Painter replay into tiled materials is not validated; import into a separate untiled project")
 
 
 def add_imported(engine, result: ImportResult, index=None, parent: Layer | None = None, record=True,
-                 progress=None) -> list:
+                 progress=None, max_dabs=MAX_DABS_TOTAL, per_layer=MAX_DABS_PER_LAYER) -> list:
     """Insert a converted smart material into the active texture set. Returns the new top layers."""
     if engine.ts is None:
         return []
+    _budgets(max_dabs,per_layer)
+    _guard(engine)
     ts = engine.ts
     if record:
         engine._push_undo(engine._snapshot_stack())
@@ -71,9 +84,7 @@ def add_imported(engine, result: ImportResult, index=None, parent: Layer | None 
         lay = _build(engine, ts, il, pending)
         target.insert(index + k, lay)
         out.append(lay)
-    stats = ReplayStats()
-    _replay(engine, ts, pending, stats, progress)
-    engine.last_replay = stats
+    _begin_replay(engine, [(ts,lay,jobs,mask) for lay,jobs,mask in pending], result.report, progress, max_dabs, per_layer)
     if out:
         if parent is None:
             ts.selected, ts.focus = target.index(out[-1]), None
@@ -84,13 +95,15 @@ def add_imported(engine, result: ImportResult, index=None, parent: Layer | None 
     return out
 
 
-def apply_mask(engine, mb: MaskBuild | None, layer: Layer | None = None, replace=False, record=True) -> bool:
+def apply_mask(engine, mb: MaskBuild | None, layer: Layer | None = None, replace=False, record=True, report=None, progress=None, max_dabs=MAX_DABS_TOTAL, per_layer=MAX_DABS_PER_LAYER) -> bool:
     """Apply a converted smart mask to `layer` (default: the selected layer). Like Painter, a black
     mask is created when the layer has none, and the smart mask's effects are added on top
     (replace=True clears the existing mask effects first)."""
     lay = layer if layer is not None else engine.layer
     if lay is None or mb is None:
         return False
+    _budgets(max_dabs,per_layer)
+    _guard(engine)
     if record:
         engine._push_undo(engine._snapshot_stack())
         if lay.mask_tex is not None:
@@ -109,18 +122,23 @@ def apply_mask(engine, mb: MaskBuild | None, layer: Layer | None = None, replace
         e2.uid = _uid()
         lay.mask_effects.append(e2)
     if mb.painted and mb.jobs:
-        stats = ReplayStats()
-        _replay(engine, ts, [(lay, mb.jobs, True)], stats)
-        engine.last_replay = stats
+        _begin_replay(engine,[(ts,lay,mb.jobs,True)],report,progress,max_dabs,per_layer)
+    elif report:
+        report=copy.deepcopy(report);report["replay"]={"status":"not_required","truncated":False}
+        engine.import_reports.append(report)
     ts.dirty = True
     engine.dirty = True
     return True
 
 
-def import_project(engine, proj, ao_samples=96, progress=None, max_dabs=MAX_DABS_TOTAL) -> int:
+def import_project(engine, proj, ao_samples=96, progress=None, max_dabs=MAX_DABS_TOTAL, per_layer=MAX_DABS_PER_LAYER) -> int:
     """Replace the engine's project with an imported .spp: the mesh, one Strata texture set per
     Painter texture set (same resolutions), every layer stack, and replayed paint strokes.
     Returns the number of brush dabs replayed."""
+    _budgets(max_dabs,per_layer)
+    import numpy as np
+    if np.any(proj.mesh.uvs < 0) or np.any(proj.mesh.uvs > 1):
+        raise ValueError("Painter tiled/out-of-range UV replay is not validated; source project was retained")
     sets = proj.sets or []
     resolutions = {s.name: int(s.resolution) for s in sets} if sets else None
     res = int(proj.resolution)
@@ -130,7 +148,7 @@ def import_project(engine, proj, ao_samples=96, progress=None, max_dabs=MAX_DABS
             progress(0.6 * f)
     engine.new_project(proj.mesh, res=res, ao_samples=ao_samples, progress=bake_prog,
                        with_default_layer=False, split_materials=len(sets) > 1, resolutions=resolutions)
-    stats = ReplayStats()
+    replay_pending=[]
     by_name = {s.name: s for s in sets}
     n = max(len(engine.sets), 1)
     for k, ts in enumerate(engine.sets):
@@ -144,18 +162,16 @@ def import_project(engine, proj, ao_samples=96, progress=None, max_dabs=MAX_DABS
         ts.selected = len(ts.layers) - 1
         ts.dirty = True
 
-        def rp_prog(d, k=k):
-            if progress is not None:
-                progress(0.6 + 0.4 * (k + min(d / max(max_dabs, 1), 1.0)) / n)
-        _replay(engine, ts, pending, stats, rp_prog, max_dabs)
+        replay_pending.extend((ts,lay,jobs,mask) for lay,jobs,mask in pending)
+    _begin_replay(engine,replay_pending,proj.result.report,
+                  (lambda value: progress(.6+.4*value)) if progress else None,max_dabs,per_layer)
     names = [ts.name for ts in engine.sets]
     want = proj.texture_set if proj.texture_set in names else None
     engine.active = names.index(want) if want else 0
     engine.undo_stack.clear()
     engine.redo_stack.clear()
-    engine.last_replay = stats
     engine.dirty = True
-    return stats.dabs
+    return engine.last_replay.dabs
 
 
 _ = (Effect,)

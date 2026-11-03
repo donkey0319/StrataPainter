@@ -167,33 +167,37 @@ PROJ = """
 uniform int u_projMode;
 uniform vec2 u_projScale, u_projOffset;
 uniform float u_projRot, u_projSharp;
-uniform int u_projAxis;
+uniform int u_projAxis,u_hasWarp,u_projClip;uniform mat3 u_projWarp;
 vec2 projXf(vec2 t) {
     float c = cos(u_projRot), s = sin(u_projRot);
     t -= 0.5;
     t = vec2(c * t.x - s * t.y, s * t.x + c * t.y);
-    return t * u_projScale + 0.5 + u_projOffset;
+    t=t*u_projScale+0.5+u_projOffset;
+    if(u_hasWarp==1){vec3 q=u_projWarp*vec3(t,1);t=q.xy/q.z;}
+    return t;
 }
 vec2 axisPlane(vec3 q, int ax) { return ax == 0 ? q.zy : (ax == 1 ? q.xz : q.xy); }
+vec4 projTex(sampler2D s,vec2 uv){if(u_projClip==1&&(any(lessThan(uv,vec2(0)))||any(greaterThan(uv,vec2(1)))))return vec4(0);return texture(s,uv);}
+vec4 projTexGrad(sampler2D s,vec2 uv){if(u_projClip==1&&(any(lessThan(uv,vec2(0)))||any(greaterThan(uv,vec2(1)))))return vec4(0);return textureGrad(s,uv,vec2(0),vec2(0));}
 vec4 projSample(sampler2D s, vec2 uv, vec3 P, vec3 N) {
-    if (u_projMode == 0) return texture(s, projXf(uv));
+    if (u_projMode == 0) return projTex(s, projXf(uv));
     vec3 q = (P - u_center) / u_meshSize;
     if (u_projMode == 1) {
         vec3 w = pow(abs(N) + 1e-5, vec3(u_projSharp));
         w /= w.x + w.y + w.z;
-        return texture(s, projXf(q.zy + 0.5)) * w.x + texture(s, projXf(q.xz + 0.5)) * w.y
-             + texture(s, projXf(q.xy + 0.5)) * w.z;
+        return projTex(s, projXf(q.zy + 0.5)) * w.x + projTex(s, projXf(q.xz + 0.5)) * w.y
+             + projTex(s, projXf(q.xy + 0.5)) * w.z;
     }
-    if (u_projMode == 2) return texture(s, projXf(axisPlane(q, u_projAxis) + 0.5));
+    if (u_projMode == 2) return projTex(s, projXf(axisPlane(q, u_projAxis) + 0.5));
     if (u_projMode == 3) {
         vec3 d = normalize(q + 1e-6);
         vec2 t = vec2(atan(d.z, d.x) / 6.2831853 + 0.5, asin(clamp(d.y, -1.0, 1.0)) / 3.14159265 + 0.5);
-        return textureGrad(s, projXf(t), vec2(0.0), vec2(0.0));
+        return projTexGrad(s,projXf(t));
     }
     // cylindrical around the chosen axis
     vec3 r = u_projAxis == 0 ? q.yzx : (u_projAxis == 1 ? q.zxy : q.xyz);
     vec2 t = vec2(atan(r.y, r.x) / 6.2831853 + 0.5, r.z + 0.5);
-    return textureGrad(s, projXf(t), vec2(0.0), vec2(0.0));
+    return projTexGrad(s,projXf(t));
 }
 """
 
@@ -264,6 +268,16 @@ void main() {
 """
 
 # --------------------------------------------------------------------------- mesh in UV space
+UV_BRUSH_VS = HEADER + """
+in vec2 in_pos;
+out vec3 v_pos; out vec3 v_nrm; out vec2 v_uv;
+void main() {
+    v_uv = in_pos * 0.5 + 0.5;
+    v_pos = vec3(v_uv, 0.0); v_nrm = vec3(0.0, 0.0, 1.0);
+    gl_Position = vec4(in_pos, 0.0, 1.0);
+}
+"""
+
 UV_VS = HEADER + """
 in vec3 in_pos; in vec3 in_nrm; in vec2 in_uv; in vec4 in_tan; in float in_curv; in vec2 in_part; in vec4 in_vcol;
 out vec3 v_pos; out vec3 v_nrm; out float v_curv; out vec2 v_uv; out vec2 v_part; out vec4 v_vcol; out vec4 v_tan;
@@ -375,31 +389,77 @@ int castRay(vec3 O, vec3 D, float tmax, out float best, out vec2 bcOut) {
 """
 
 # cast from a cage above each low-poly texel down into the high poly
-HP_RAY_FS = HEADER + RAYCAST_LIB + """
-uniform sampler2D u_pos, u_nrm;
+BAKE_RAY_SETUP = """
+uniform sampler2D u_cage;
+uniform int u_hasCage;
+uniform sampler2D u_rayCorrection, u_distanceCorrection;
+uniform int u_hasRayCorrection, u_hasDistanceCorrection;
 uniform float u_front, u_rear;
 in vec2 v_uv;
+void projectionRay(vec4 P, vec3 n, out vec3 O, out vec3 direction, out float front, out float rear) {
+    O = P.xyz + n * u_front;
+    direction = n;
+    front = u_front;
+    if (u_hasCage == 1) {
+        vec3 cage = texture(u_cage, v_uv).xyz;
+        front = length(cage - P.xyz);
+        direction = normalize(cage - P.xyz);
+        O = cage;
+    }
+    rear = u_rear;
+    if (u_hasRayCorrection == 1) {
+        vec4 field = texture(u_rayCorrection, v_uv);
+        vec3 corrected = field.rgb / max(field.a, 1e-6) * 2.0 - 1.0;
+        if (length(corrected) > 1e-6) {
+            vec3 blended = mix(direction, normalize(corrected), clamp(field.a, 0.0, 1.0));
+            if (length(blended) > 1e-6) direction = normalize(blended);
+        }
+    }
+    if (u_hasDistanceCorrection == 1) {
+        vec2 field = texture(u_distanceCorrection, v_uv).rg;
+        float multiplier = 1.0 + clamp(field.r / max(field.g, 1e-6) * 2.0 - 1.0, -1.0, 1.0) * clamp(field.g, 0.0, 1.0);
+        front *= max(multiplier, 0.001);
+        rear *= max(multiplier, 0.001);
+    }
+    if (u_hasRayCorrection == 1 || u_hasDistanceCorrection == 1) O = P.xyz + direction * front;
+}
+"""
+
+CAGE_BLOCK_FS = HEADER + RAYCAST_LIB + BAKE_RAY_SETUP + """
+uniform sampler2D u_pos, u_nrm; uniform float u_bias; out vec4 o;
+void main(){vec4 P=texture(u_pos,v_uv); o=vec4(0); if(P.a<0.5)return;
+vec3 n=normalize(texture(u_nrm,v_uv).xyz+1e-9), O, direction; float front, rear;
+projectionRay(P,n,O,direction,front,rear); float best; vec2 bc;
+int t=castRay(P.xyz+direction*u_bias,direction,max(front-2.0*u_bias,0.0),best,bc);
+o=vec4(t>=0?1.0:0.0,0,0,1);}
+"""
+
+HP_RAY_FS = HEADER + RAYCAST_LIB + BAKE_RAY_SETUP + """
+uniform sampler2D u_pos, u_nrm, u_part, u_cageBlocked; uniform int u_partID;
 layout(location=0) out vec4 o_pos;
 layout(location=1) out vec4 o_nrm;
 layout(location=2) out vec4 o_info;
 layout(location=3) out vec4 o_col;
 void main() {
+    if (u_partID >= 0 && int(texture(u_part, v_uv).r + 0.5) != u_partID) discard;
     vec4 P = texture(u_pos, v_uv);
     vec3 n = normalize(texture(u_nrm, v_uv).xyz + 1e-9);
     o_pos = P; o_nrm = vec4(n, 1.0); o_info = vec4(u_front, 0.0, 0.0, 1.0); o_col = vec4(0.0);
     if (P.a < 0.5) return;
-    vec3 O = P.xyz + n * u_front;
+    if (u_hasCage == 1 && texture(u_cageBlocked, v_uv).r > 0.5) {o_info.z=-2.0; return;}
+    vec3 O, direction; float front, rear;
+    projectionRay(P,n,O,direction,front,rear);
     float best; vec2 bc;
-    int t = castRay(O, -n, u_front + u_rear, best, bc);
+    int t = castRay(O, -direction, front + rear, best, bc);
     if (t < 0) return;
     float w = 1.0 - bc.x - bc.y;
     vec3 hn = texelFetch(u_tnrm, at(3 * t), 0).xyz * w + texelFetch(u_tnrm, at(3 * t + 1), 0).xyz * bc.x
             + texelFetch(u_tnrm, at(3 * t + 2), 0).xyz * bc.y;
     vec4 hc = texelFetch(u_tcol, at(3 * t), 0) * w + texelFetch(u_tcol, at(3 * t + 1), 0) * bc.x
             + texelFetch(u_tcol, at(3 * t + 2), 0) * bc.y;
-    o_pos = vec4(O - n * best, 1.0);
+    o_pos = vec4(O - direction * best, 1.0);
     o_nrm = vec4(normalize(hn + 1e-9), 1.0);
-    o_info = vec4(best, 1.0, float(t), 1.0);
+    o_info = vec4(u_hasCage == 1 || u_hasRayCorrection == 1 || u_hasDistanceCorrection == 1 ? u_front - dot(o_pos.xyz - P.xyz, n) : best, 1.0, float(t), 1.0);
     o_col = vec4(hc.rgb, 1.0);
 }
 """
@@ -519,6 +579,7 @@ CONTENT_FS = HEADER + NOISE + MESHU + PROJ + """
 uniform sampler2D u_s0, u_s1, u_s2, u_s3, u_s4, u_s5, u_s6;   // paint textures or fill maps (C R M H N E O)
 uniform sampler2D u_prev0, u_prev1, u_prev2, u_prev3;
 uniform sampler2D u_pos, u_nrm;
+uniform sampler2D u_authored;uniform int u_ribbon;
 uniform int u_type;            // 0 fill, 1 paint
 uniform int u_hasMap[7];
 uniform int u_pass[7];         // passthrough: take the channel from the stack below
@@ -534,6 +595,7 @@ layout(location=3) out vec4 o3;
 layout(location=4) out vec4 o4;
 float un(vec4 t) { return t.g > 1e-4 ? t.r / t.g : 0.0; }
 void main() {
+    vec2 materialUV=u_ribbon==1?texture(u_authored,v_uv).rg:v_uv;
     vec3 P = texture(u_pos, v_uv).xyz;
     vec3 N = normalize(texture(u_nrm, v_uv).xyz + 1e-6);
     vec3 col, nm, em; float ro, me, he, op;
@@ -543,13 +605,13 @@ void main() {
         float n1 = 0.5, n2 = 0.5, n3 = 0.5;
         if (u_var > 0.0) { n1 = fbm(q); n2 = fbm(q * 1.7 + 4.2); }
         if (u_bump > 0.0) n3 = fbm(q * 3.1 + 9.1);
-        col = u_hasMap[0] == 1 ? projSample(u_s0, v_uv, P, N).rgb : u_color;
-        ro = u_hasMap[1] == 1 ? projSample(u_s1, v_uv, P, N).r : u_rough;
-        me = u_hasMap[2] == 1 ? projSample(u_s2, v_uv, P, N).r : u_metal;
-        he = u_hasMap[3] == 1 ? projSample(u_s3, v_uv, P, N).r : u_height;
-        nm = u_hasMap[4] == 1 ? projSample(u_s4, v_uv, P, N).rgb : u_normal;
-        em = u_hasMap[5] == 1 ? projSample(u_s5, v_uv, P, N).rgb : u_emissive;
-        op = u_hasMap[6] == 1 ? projSample(u_s6, v_uv, P, N).r : u_opac;
+        col = u_hasMap[0] == 1 ? projSample(u_s0, materialUV, P, N).rgb : u_color;
+        ro = u_hasMap[1] == 1 ? projSample(u_s1, materialUV, P, N).r : u_rough;
+        me = u_hasMap[2] == 1 ? projSample(u_s2, materialUV, P, N).r : u_metal;
+        he = u_hasMap[3] == 1 ? projSample(u_s3, materialUV, P, N).r : u_height;
+        nm = u_hasMap[4] == 1 ? projSample(u_s4, materialUV, P, N).rgb : u_normal;
+        em = u_hasMap[5] == 1 ? projSample(u_s5, materialUV, P, N).rgb : u_emissive;
+        op = u_hasMap[6] == 1 ? projSample(u_s6, materialUV, P, N).r : u_opac;
         col = clamp(col * (1.0 + (n1 - 0.5) * u_var * 2.0), 0.0, 1.0);
         ro = clamp(ro + (n2 - 0.5) * u_var, 0.0, 1.0);
         he = clamp(he + (n3 - 0.5) * u_bump, 0.0, 1.0);
@@ -582,7 +644,7 @@ void main() {
 """
 
 # 2) content effects operate on T0-T4 (ping-pong)
-CONTENT_EFFECT_FS = HEADER + COLOR + """
+CONTENT_EFFECT_FS = HEADER + COLOR + BLEND + """
 uniform sampler2D u_t0, u_t1, u_t2, u_t3, u_t4;
 uniform sampler2D u_b0, u_b1, u_b2, u_b3, u_b4;      // blurred copy (kind 4)
 uniform int u_kind;          // 1 hsl, 2 levels, 3 invert, 4 blur mix, 5 brightness/contrast
@@ -590,6 +652,7 @@ uniform int u_channel;       // CHANNELS index, -1 = all
 uniform float u_opacity;
 uniform vec3 u_hsl;          // hue shift (turns), saturation, lightness (-1..1)
 uniform int u_target;        // hsl: 0 colour, 1 emissive
+uniform int u_effectBlend;
 uniform vec3 u_lvIn;         // in_lo, in_hi, gamma
 uniform vec2 u_lvOut;
 uniform vec2 u_bc;           // brightness, contrast
@@ -625,6 +688,15 @@ void main() {
         vec3 rgb = hsv2rgb(h);
         rgb = u_hsl.z >= 0.0 ? mix(rgb, vec3(1.0), u_hsl.z) : rgb * (1.0 + u_hsl.z);
         if (u_target == 0) r0.rgb = rgb; else r2.rgb = rgb;
+    } else if (u_kind == 6) {
+        vec3 c=texture(u_b0,v_uv).rgb;
+        if(on(0))r0.rgb=c;
+        if(on(1))r1.r=c.r;
+        if(on(2))r1.g=c.r;
+        if(on(3))r1.b=c.r;
+        if(on(4))r3.rgb=c;
+        if(on(5))r2.rgb=c;
+        if(on(6))r1.a=c.r;
     } else if (u_kind == 4) {
         vec4 b0 = texture(u_b0, v_uv), b1 = texture(u_b1, v_uv), b2 = texture(u_b2, v_uv);
         vec4 b3 = texture(u_b3, v_uv), b4 = texture(u_b4, v_uv);
@@ -644,6 +716,19 @@ void main() {
         if (on(4) && u_kind == 3) r3.rgb = vec3(1.0 - t3.r, 1.0 - t3.g, t3.b);
         if (on(5)) r2.rgb = op3(t2.rgb);
         if (on(6)) r1.a = op1(t1.a);
+    }
+    if (u_effectBlend == 7) { r0=t0; r1=t1; r2=t2; r3=t3; }
+    else if (u_effectBlend != 0) {
+        bool allCh = u_kind != 1 && u_channel < 0;
+        if (u_kind == 1 ? u_target == 0 : (allCh || u_channel == 0)) r0.rgb = blendMode(t0.rgb, r0.rgb, u_effectBlend);
+        if (u_kind != 1) {
+            if (allCh || u_channel == 1) r1.r = blendScalar(t1.r,r1.r,u_effectBlend);
+            if (allCh || u_channel == 2) r1.g = blendScalar(t1.g,r1.g,u_effectBlend);
+            if (allCh || u_channel == 3) r1.b = blendScalar(t1.b,r1.b,u_effectBlend);
+            if (allCh || u_channel == 6) r1.a = blendScalar(t1.a,r1.a,u_effectBlend);
+            if (allCh || u_channel == 4) r3.rgb = blendNormal(t3.rgb, r3.rgb, u_effectBlend, 1.0);
+        }
+        if (u_kind == 1 ? u_target == 1 : (allCh || u_channel == 5)) r2.rgb = blendMode(t2.rgb, r2.rgb, u_effectBlend);
     }
     o0 = mix(t0, r0, u_opacity); o1 = mix(t1, r1, u_opacity); o2 = mix(t2, r2, u_opacity);
     o3 = mix(t3, r3, u_opacity); o4 = mix(t4, r4, u_opacity);
@@ -727,13 +812,14 @@ void main() {
     }
     else if (u_kind == 8) { v = smoothstep(u_th.x - u_th.y, u_th.x + u_th.y + 1e-5, prev); isOp = true; }
     else if (u_kind == 9) { v = texture(u_map, v_uv).r; isOp = true; }
+    else if (u_kind == 11) {v=prev*texture(u_map,v_uv).b;isOp=true;}
     else if (u_kind == 10) {
         int part = int(texture(u_part, v_uv).r + 0.5);
         v = prev * texelFetch(u_partLUT, ivec2(clamp(part, 0, 1023), 0), 0).r;
         isOp = true;
     }
-    float r = isOp ? v : clamp(blendScalar(prev, v, u_blend), 0.0, 1.0);
-    if (u_blend == 7 && !isOp) r = prev;
+    float r = isOp && u_blend == 0 ? v : clamp(blendScalar(prev, v, u_blend), 0.0, 1.0);
+    if (u_blend == 7) r = prev;
     float m = mix(prev, r, u_opacity);
     o = vec4(m, m, m, 1.0);
 }
@@ -824,15 +910,28 @@ void main() {
 # final normal: normal channel combined with the normal derived from height (OpenGL convention, +Y up)
 NORMAL_FROM_HEIGHT_FS = HEADER + COLOR + BLEND + """
 uniform sampler2D u_rmh;
+uniform sampler2D u_edges;
+uniform int u_hasEdges;
 uniform sampler2D u_nch;
 uniform sampler2D u_baked;
 uniform int u_hasNch, u_hasBaked;
 uniform float u_strength;
 in vec2 v_uv; out vec4 o;
+float tileHeight(vec2 uv) {
+    if (u_hasEdges == 1) {
+        int edge = uv.x < 0.0 ? 0 : (uv.x >= 1.0 ? 1 : (uv.y < 0.0 ? 2 : (uv.y >= 1.0 ? 3 : -1)));
+        if (edge >= 0) {
+            vec2 sampleUV = vec2(clamp(edge < 2 ? uv.y : uv.x, 0.0, 1.0), (float(edge) + 0.5) / 4.0);
+            vec2 value = texture(u_edges, sampleUV).rg;
+            if (value.g > 0.5) return value.r;
+        }
+    }
+    return texture(u_rmh, uv).b;
+}
 void main() {
     vec2 px = 1.0 / vec2(textureSize(u_rmh, 0));
-    float l = texture(u_rmh, v_uv - vec2(px.x, 0)).b, r = texture(u_rmh, v_uv + vec2(px.x, 0)).b;
-    float d = texture(u_rmh, v_uv - vec2(0, px.y)).b, u = texture(u_rmh, v_uv + vec2(0, px.y)).b;
+    float l = tileHeight(v_uv - vec2(px.x, 0)), r = tileHeight(v_uv + vec2(px.x, 0));
+    float d = tileHeight(v_uv - vec2(0, px.y)), u = tileHeight(v_uv + vec2(0, px.y));
     float s = u_strength * float(textureSize(u_rmh, 0).x) / 256.0;
     vec3 n = normalize(vec3((l - r) * s, (d - u) * s, 1.0));
     if (u_hasNch == 1) n = nWhiteout(nDecode(texture(u_nch, v_uv).rgb), n);
@@ -853,6 +952,9 @@ BRUSH_LIB = NOISE + """
 uniform vec3 u_hit;
 uniform float u_radius;
 uniform vec3 u_fT, u_fB, u_fN;      // tangent frame at the hit (T along the stamp's x)
+uniform int u_uvView;
+uniform vec2 u_uvScale, u_uvCenter;
+uniform sampler2D u_uvCoverage;
 uniform int u_align;                // 0 camera, 1 tangent wrap, 2 tangent planar, 3 uv
 uniform vec2 u_hitUV;
 uniform float u_radiusUV;
@@ -893,6 +995,12 @@ float dabAlpha() {
     g_P = P;
     vec4 c = u_vp * vec4(P, 1.0);
     g_screen = c.w > 0.0 ? c.xy / c.w * 0.5 + 0.5 : vec2(-1.0);
+    if (u_uvView == 1) {
+        P = vec3(v_uv, 0.0); N = vec3(0.0, 0.0, 1.0); g_P = P;
+        c = vec4(0.0, 0.0, 0.0, 1.0);
+        g_screen = (v_uv - u_uvCenter) / u_uvScale + 0.5;
+        if (texture(u_uvCoverage, v_uv).r < 0.5) return -1.0;
+    }
     if (u_full == 1) return 1.0;
     vec3 D = P - u_hit;
     float d3 = length(D);
@@ -917,7 +1025,7 @@ float dabAlpha() {
         a *= 1.0 - smoothstep(u_hardness * 0.999, 1.0, d);
     }
     vec3 V = normalize(u_campos - P);
-    a *= smoothstep(u_backCos - 0.05, u_backCos + 0.15, dot(N, V));
+    if (u_uvView == 0) a *= smoothstep(u_backCos - 0.05, u_backCos + 0.15, dot(N, V));
     if (u_occl == 1) {
         vec2 s = g_screen;
         if (s.x < 0.0 || s.y < 0.0 || s.x > 1.0 || s.y > 1.0) return -1.0;
@@ -1001,9 +1109,15 @@ void main() {
     float a = dabAlpha();
     if (a <= 0.0) discard;
     vec2 s2 = g_screen + u_offsetPx / u_viewport;
-    if (s2.x < 0.0 || s2.y < 0.0 || s2.x > 1.0 || s2.y > 1.0) discard;
-    if (texture(u_pickPos, s2).a < 0.5) discard;
-    vec2 suv = texture(u_pickUV, s2).xy;
+    if (u_uvView == 0 && (s2.x < 0.0 || s2.y < 0.0 || s2.x > 1.0 || s2.y > 1.0)) discard;
+    vec2 suv;
+    if (u_uvView == 1) {
+        suv = (s2 - 0.5) * u_uvScale + u_uvCenter;
+        if (any(lessThan(suv, vec2(0.0))) || any(greaterThan(suv, vec2(1.0))) || texture(u_uvCoverage, suv).r < 0.5) discard;
+    } else {
+        if (texture(u_pickPos, s2).a < 0.5) discard;
+        suv = texture(u_pickUV, s2).xy;
+    }
     o = mix(texture(u_cur, v_uv), texture(u_src, suv), clamp(a, 0.0, 1.0));
 }
 """
@@ -1053,15 +1167,19 @@ void main() {
 # --------------------------------------------------------------------------- viewport
 SCENE_VS = HEADER + """
 uniform mat4 u_vp;
+uniform sampler2D u_texR;
+uniform float u_displacementScale, u_heightMidlevel;
 in vec3 in_pos; in vec3 in_nrm; in vec2 in_uv; in vec4 in_tan; in float in_curv; in vec2 in_part;
 out vec3 v_pos; out vec3 v_nrm; out vec2 v_uv; out vec4 v_tan; out vec2 v_part;
 void main() {
     v_pos = in_pos; v_nrm = in_nrm; v_uv = in_uv; v_tan = in_tan; v_part = in_part;
-    gl_Position = u_vp * vec4(in_pos, 1.0);
+    if (u_displacementScale != 0.0) v_pos += normalize(in_nrm) * ((textureLod(u_texR, in_uv, 0.0).b - u_heightMidlevel) * u_displacementScale);
+    gl_Position = u_vp * vec4(v_pos, 1.0);
 }
 """
 
 PICK_FS = HEADER + """
+uniform int u_triOffset;
 in vec3 v_pos; in vec3 v_nrm; in vec2 v_uv; in vec2 v_part;
 layout(location=0) out vec4 o_pos;
 layout(location=1) out vec4 o_nrm;
@@ -1069,7 +1187,7 @@ layout(location=2) out vec4 o_uv;
 void main() {
     o_pos = vec4(v_pos, 1.0);
     o_nrm = vec4(normalize(v_nrm), 1.0);
-    o_uv = vec4(v_uv, float(gl_PrimitiveID), v_part.x);
+    o_uv = vec4(v_uv, float(gl_PrimitiveID + u_triOffset), v_part.x);
 }
 """
 
@@ -1107,6 +1225,10 @@ vec3 envIrradiance(vec3 n) {
 
 SCENE_FS = HEADER + ENV + NOISE + """
 uniform sampler2D u_texC, u_texR, u_texN, u_ao, u_curv, u_maskPrev, u_texE, u_thick, u_id, u_pos, u_wnrm;
+uniform sampler2D u_bakedNormal, u_bakedHeight;
+uniform sampler2D u_specGloss, u_coat;
+uniform int u_materialModel, u_hasCoat;
+uniform float u_displacementScale;
 uniform vec3 u_campos;
 uniform int u_mode;   // strata.renderer.DISPLAY_MODES
 uniform float u_exposure;
@@ -1123,6 +1245,7 @@ vec3 aces(vec3 x) { return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59
 
 void main() {
     vec3 Ng = normalize(v_nrm);
+    if (u_displacementScale != 0.0) { vec3 dn=normalize(cross(dFdx(v_pos),dFdy(v_pos))); Ng=dot(dn,Ng)<0.0?-dn:dn; }
     vec3 T = normalize(v_tan.xyz - Ng * dot(Ng, v_tan.xyz));
     vec3 B = cross(Ng, T) * v_tan.w;
     vec3 tn = texture(u_texN, v_uv).xyz * 2.0 - 1.0;
@@ -1130,6 +1253,7 @@ void main() {
     vec4 c = texture(u_texC, v_uv);
     vec4 rmh = texture(u_texR, v_uv);
     float ao = u_useAO == 1 ? texture(u_ao, v_uv).r : 1.0;
+    if (u_mode == 18) { o = vec4(N * 0.5 + 0.5, 1.0); return; }
     vec3 V = normalize(u_campos - v_pos);
     if (u_alphaTest == 1 && rmh.a < 0.5 && u_mode == 0) discard;
 
@@ -1151,12 +1275,21 @@ void main() {
     if (u_mode == 11) { o = vec4(vec3(rmh.a), 1.0); return; }
     if (u_mode == 12) { o = vec4(vec3(texture(u_thick, v_uv).r), 1.0); return; }
     if (u_mode == 13) { o = vec4(texture(u_id, v_uv).rgb, 1.0); return; }
+    if (u_mode == 16) { o = vec4(texture(u_bakedNormal, v_uv).rgb, 1.0); return; }
+    if (u_mode == 17) { o = vec4(vec3(texture(u_bakedHeight, v_uv).r), 1.0); return; }
     if (u_mode == 14) { o = vec4(normalize(texture(u_wnrm, v_uv).xyz) * 0.5 + 0.5, 1.0); return; }
     if (u_mode == 15) { o = vec4((texture(u_pos, v_uv).xyz - u_bmin) / max(u_bmax - u_bmin, vec3(1e-5)), 1.0); return; }
 
     vec3 albedo = srgb2lin(c.rgb);
     float rough = clamp(rmh.r, 0.04, 1.0), metal = clamp(rmh.g, 0.0, 1.0);
     vec3 F0 = mix(vec3(0.04), albedo, metal);
+    vec4 sg = texture(u_specGloss, v_uv);
+    vec2 coat = u_hasCoat == 1 ? texture(u_coat, v_uv).rg : vec2(0.0, 0.1);
+    if (u_materialModel == 1) { F0 = clamp(sg.rgb, 0.0, 1.0); rough = clamp(1.0-sg.a, 0.04, 1.0); metal = 0.0; }
+    if (u_mode == 19) { o=vec4(vec3(texture(u_bakedHeight,v_uv).r),1.0);return; }
+    if (u_mode == 20) { o=vec4(F0,1.0);return; }
+    if (u_mode == 21) { o=vec4(vec3(rough),1.0);return; }
+    if (u_mode == 22) { o=vec4(coat,0.0,1.0);return; }
     float NoV = max(dot(N, V), 1e-4);
 
     // key light (GGX)
@@ -1183,6 +1316,17 @@ void main() {
     vec3 ambDiff = envIrradiance(N) * albedo * (1.0 - metal);
     float specOcc = clamp(pow(NoV + ao, exp2(-16.0 * rough - 1.0)) - 1.0 + ao, 0.0, 1.0);
     vec3 col = direct * mix(1.0, ao, 0.5) + ambDiff * ao + ambSpec * specOcc;
+    if (coat.x > 0.0) {
+        float cr=clamp(coat.y,0.04,1.0), ca=cr*cr, ca2=ca*ca;
+        float cd=ca2/(PI*pow(NoH*NoH*(ca2-1.0)+1.0,2.0));
+        float ck=(cr+1.0)*(cr+1.0)/8.0;
+        float cg=NoV/(NoV*(1.0-ck)+ck)*NoL/(NoL*(1.0-ck)+ck);
+        float cf=.04+.96*pow(1.0-VoH,5.0);
+        float cv=.04+.96*pow(1.0-NoV,5.0);
+        vec3 coatLight=envColor(R,cr)*cv;
+        if(u_hasEnv==0) coatLight+=cd*cg*cf/max(4.0*NoV*NoL,1e-4)*NoL*vec3(3.4,3.25,3.05);
+        col=col*(1.0-coat.x*cv)+coat.x*coatLight;
+    }
     col += srgb2lin(texture(u_texE, v_uv).rgb) * u_emissiveIntensity;
     col = aces(col * u_exposure);
     o = vec4(pow(col, vec3(1.0 / 2.2)), 1.0);
@@ -1216,6 +1360,45 @@ void main() {
     float v = smoothstep(0.0, 1.0, v_uv.y);
     float vig = 1.0 - 0.25 * length(v_uv - 0.5);
     o = vec4(mix(a, b, v) * vig, 1.0);
+}
+"""
+
+SYMMETRY_GUIDE_VS = HEADER + """
+uniform mat4 u_vp;
+in vec3 in_pos;
+out vec3 v_pos;
+void main() {
+    v_pos = in_pos;
+    gl_Position = u_vp * vec4(in_pos, 1.0);
+    gl_Position.z -= 0.00001 * gl_Position.w;
+}
+"""
+SYMMETRY_GUIDE_FS = HEADER + """
+uniform vec3 u_center;
+uniform int u_axis;
+uniform int u_radial;
+uniform int u_copies;
+in vec3 v_pos;
+out vec4 o;
+void main() {
+    vec3 p = v_pos - u_center;
+    float distance = p[u_axis];
+    float width = fwidth(distance);
+    if (u_radial == 1) {
+        vec2 q = u_axis == 0 ? p.yz : (u_axis == 1 ? p.zx : p.xy);
+        float angle = atan(q.y, q.x);
+        float step = 6.28318530718 / float(u_copies);
+        float boundary = floor(angle / step + 0.5) * step;
+        vec2 normal = vec2(-sin(boundary), cos(boundary));
+        distance = dot(q, normal);
+        // Differentiate position to avoid seams where the nearest sector changes.
+        width = abs(dot(dFdx(q), normal)) + abs(dot(dFdy(q), normal));
+    }
+    // Derivatives keep the surface guide about two pixels wide at any zoom.
+    if (width < 1e-8) discard;
+    float alpha = 1.0 - smoothstep(0.5, 1.5, abs(distance) / width);
+    if (alpha <= 0.0) discard;
+    o = vec4(1.0, 0.06, 0.04, alpha * 0.95);
 }
 """
 

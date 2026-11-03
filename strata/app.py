@@ -38,19 +38,38 @@ from imgui_bundle import imgui
 from imgui_bundle.python_backends.glfw_backend import GlfwRenderer
 
 from .engine import Engine
-from .exporter import EXPORT_PRESETS, export
+from . import exporter as texture_exporter
 from .baker import BakeSettings
+from .channels import CHANNEL_DESCRIPTORS
 from .layers import BLEND_MODES, CHANNELS, GENERATORS, HEIGHT_BLEND, STENCIL_TILING, SYMMETRY
 from .layers import _ids as _layer_ids
 from .painter import TOOL_CLONE, TOOL_PAINT, TOOL_PROJECTION, TOOL_SMUDGE, stencil_matrix
 from .mesh import BUILTIN_MESHES, load_mesh
 from .presets import MATERIALS, SMART_MATERIALS
 from .renderer import DISPLAY_MODES
+from .materialpreview import MaterialPreviews
+from .presets import fill as preset_fill
 from .ui.commands import Chord, Palette, Registry, capturable_keys
 from .ui.theme import (ACCENT, FILL_COL, ICON, PAINT_COL, SEL_BG, SEL_BG_HI, SEL_BG_SOFT, TEXT_DIM, V2, V4,
                        WARN_COL, apply_theme,
                        col32, load_fonts)
 from .ui.uvview import UVView
+from .ui.project import ProjectUI
+from .ui.material import MaterialUI
+from .ui.effects import EffectsUI
+from .ui.bake import BakeUI
+from .ui.imports import ImportUI
+from .ui.authored import AuthoredUI
+from .ui.channels import ChannelsUI
+from .ui.delivery import DeliveryUI
+from . import authored as authored_model
+from .ui.native import NativeUI
+from .ui.memory import MemoryUI
+from .ui.tiles import TilesUI
+from .tablet import TabletInput
+from .resources import BUILTIN_ALPHAS
+from .layers import ALIGNMENTS
+from .viewinput import ViewInput
 from .substance import importer as sp_import
 from .substance import library as sp_library
 
@@ -233,6 +252,8 @@ class App:
         self._glfw_cursors, self._cur_cursor = {}, None
         glfw.set_drop_callback(self.window, self._on_drop)
         glfw.set_window_close_callback(self.window, self._on_close_request)
+        self.tablet = TabletInput()
+        self.tablet.attach(self.window)
 
         self.engine = Engine(self.ctx)
         self.bsize = BrushSize(lambda: self.engine.brush)
@@ -285,9 +306,35 @@ class App:
         self.open_export = False
         self.open_help = False       # kept for scripts/tests: opens the Shortcuts window
         self.new_mesh_idx, self.new_res_idx, self.new_path = 0, 2, ""
+        self.new_color_mode = self.new_tangent_basis = 0
+        self.new_auto_uv = self.new_uv_regenerate = False
+        self.new_uv_method = self.new_unit = 0
+        self.new_uv_tiles = 1
+        self.new_uv_padding, self.new_uv_info = 8, ""
+        self.new_uv_angle, self.new_uv_rotate = 66., True
         self.export_preset, self.export_dir = 0, os.path.abspath("export")
         self.export_name, self.export_open_folder = "", True
+        self.export_templates = ["Unreal Engine (Packed)"] + [
+            n for n in texture_exporter.OUTPUT_TEMPLATES if n != "Unreal Engine (Packed)"]
+        self.export_custom_template = None
+        self.export_template_json = ""
+        self.export_format, self.export_depth, self.export_size = "", "", None
+        self.export_padding, self.export_dilation = "infinite", 16
+        self.export_sets, self.export_set_identity = {}, None
+        self.export_overrides = {}
 
+        self.project_ui = ProjectUI(self, CONFIG_DIR, pfd)
+        self.material_ui = MaterialUI(self)
+        self.effects_ui = EffectsUI(self)
+        self.bake_ui = BakeUI(self)
+        self.import_ui = ImportUI(self)
+        self.authored_ui = AuthoredUI(self)
+        self.channels_ui = ChannelsUI(self)
+        self.delivery_ui = DeliveryUI(self)
+        self.native_ui = NativeUI(self)
+        self.memory_ui = MemoryUI(self)
+        self.tiles_ui = TilesUI(self)
+        self._fill_projection_drag = None
         self.palette = Palette()
         self._assets = ([("smart", n) for n in SMART_MATERIALS] + [("mat", n) for n in MATERIALS]
                         + [("gen", k) for k in range(1, len(GENERATORS))])
@@ -348,22 +395,36 @@ class App:
         self._pending_shown = 0
 
     def _new_project(self, mesh, res):
+        self._finish_fill_projection(cancel=True)
+        self._finish_property_edit()
         t = time.time()
-        self.engine.new_project(mesh, res)
+        self.engine.new_project(mesh, res, color_settings={"mode": "managed" if self.new_color_mode else "legacy"},
+                                tangent_basis="mikk" if self.new_tangent_basis else "legacy",
+                                uv_settings={"method": "angle" if self.new_uv_method else "smart",
+                                             "preserve_valid": not self.new_uv_regenerate, "padding_px": self.new_uv_padding,
+                                             "angle_degrees": self.new_uv_angle, "rotate": self.new_uv_rotate,
+                                             "resolution": int(res), "tile_count": self.new_uv_tiles} if self.new_auto_uv else None,
+                                source_unit=[None, "m", "cm", "mm", "in", "ft"][self.new_unit])
+        self.material_ui.transform_tool = None
+        self.material_ui.transform_layer_pid = None
         self.project_path = None
         self.uv.reset()
         name = mesh if isinstance(mesh, str) else mesh.name
         self.msg(f"New project: {name} @ {res}px  (baked in {time.time() - t:.1f}s)")
         uv = self.engine.mesh.uvs
         if uv.min() < -1e-3 or uv.max() > 1.001:
-            self.msg("Warning: this mesh has UVs outside 0-1; those parts can't be painted.")
+            for ts in self.engine.sets:
+                coordinates = uv[self.engine.mesh.indices[ts.tri_ids]]
+                if ts.tiles is None and (coordinates.min() < -1e-3 or coordinates.max() > 1.001):
+                    self.msg("This mesh has UVs outside 0-1. Supported UDIM pages can be painted after enabling material tiles.")
+                    break
 
     def _on_drop(self, window, paths):
         if not paths:
             return
         p = paths[0]
         ext = os.path.splitext(p)[1].lower()
-        if ext == ".strata":
+        if ext == ".strata" or re.search(r"\.strata\.bak[0-9]+$", p, re.IGNORECASE):
             self._run_busy("Opening project...", lambda: self._open(p))
         elif ext in (".obj", ".fbx", ".gltf", ".glb"):
             self.new_path, self.new_mesh_idx = p, len(BUILTIN_MESHES)
@@ -380,16 +441,32 @@ class App:
                 self._apply_sp_mask(p)
             else:
                 self.msg("Select a layer first, then drop the smart mask on the window.")
+        elif ext in (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".tga", ".bmp", ".exr", ".hdr"):
+            self.material_ui.import_resources(paths)
         else:
             self.msg(f"Can't open {os.path.basename(p)}: unsupported file type")
 
     def _open(self, path):
+        self._finish_fill_projection(cancel=True)
+        self._finish_property_edit()
         self.engine.load(path)
-        self.project_path = path
+        self.material_ui.transform_tool = None
+        self.material_ui.transform_layer_pid = None
+        backup = re.search(r"\.bak[0-9]+$", os.fspath(path), re.IGNORECASE)
+        self.project_path = os.fspath(path)[:backup.start()] if backup else path
+        if backup:
+            self.engine.mark_modified()
+        self._release_clip()
+        self.sel_uids, self._last_primary = set(), None
+        self.project_ui.last_snapshot = None
         self.uv.reset()
-        self.msg(f"Opened {os.path.basename(path)}")
+        self.msg(f"{'Recovered backup' if backup else 'Opened'} {os.path.basename(path)}")
+        for diagnostic in getattr(self.engine, "project_diagnostics", []):
+            self.msg(str(diagnostic.get("message", diagnostic)))
 
-    def _save(self, save_as=False):
+    def _save(self, save_as=False, portable=False):
+        self._finish_fill_projection()
+        self._finish_property_edit()
         path = self.project_path
         if save_as or not path:
             if pfd is None:
@@ -400,9 +477,9 @@ class App:
             if not path.lower().endswith(".strata"):
                 path += ".strata"
         try:
-            self.engine.save(path)
+            self.engine.save(path, portable=portable, backups=self.project_ui.backups)
             self.project_path = path
-            self.msg(f"Saved {path}")
+            self.msg(f"Saved {'portable project ' if portable else ''}{path}")
             return True
         except Exception as e:
             self.msg(f"Save failed: {e}")
@@ -434,7 +511,7 @@ class App:
     def _ask_open(self):
         if pfd is None:
             self.msg("File dialogs unavailable"); return
-        r = pfd.open_file("Open project", "", ["Strata project", "*.strata"]).result()
+        r = pfd.open_file("Open project", "", ["Strata project and backups", "*.strata *.strata.bak*"]).result()
         if r:
             self._run_busy("Opening project...", lambda: self._open(r[0]))
 
@@ -501,11 +578,13 @@ class App:
         fresh.layers = [copy.deepcopy(il) for il in res.layers]     # every drop gets its own layers
         for il in fresh.layers:
             il.layer.uid = next(_layer_ids)
-        self.engine.add_imported(fresh, index=index)
-        self.engine.brush.target = 0
-        n = len(res.notes)
-        self.msg(f"Added Substance smart material: {res.name}" + (f"  ({n} approximation{'s' if n > 1 else ''}, see Log)" if n else ""))
-        self._log_notes(res.notes)
+        def apply():
+            self.engine.add_imported(fresh, index=index, progress=self.import_ui.progress, max_dabs=self.import_ui.max_dabs, per_layer=self.import_ui.per_layer)
+            self.engine.brush.target = 0
+            n = len(res.notes)
+            self.msg(f"Added Substance smart material: {res.name}" + (f"  ({n} approximation{'s' if n > 1 else ''}, see Log)" if n else ""))
+            self._log_notes(res.notes)
+        self.import_ui.run(apply)
 
     def _apply_sp_mask(self, path, idx=None):
         try:
@@ -516,8 +595,11 @@ class App:
             return
         if sm.mask is None:
             self.msg(f"{sm.name}: no mask Strata can use (see Log)")
-        elif self.engine.apply_mask_state(sm.mask, idx):
-            self.msg(f"Applied Substance smart mask: {sm.name}")
+        else:
+            def apply():
+                if self.engine.apply_mask_state(sm.mask, idx, report=sm.report, progress=self.import_ui.progress, max_dabs=self.import_ui.max_dabs, per_layer=self.import_ui.per_layer):
+                    self.msg(f"Applied Substance smart mask: {sm.name}")
+            self.import_ui.run(apply)
         self._log_notes(sm.notes)
 
     def _begin_spp(self, path):
@@ -534,15 +616,16 @@ class App:
         def job():
             t = time.time()
             proj = sp_import.load_project(info.path, set_index)
-            dabs = self.engine.import_painter_project(proj)
+            self.import_ui.cancelled=False
+            dabs = self.engine.import_painter_project(proj, progress=self.import_ui.progress, max_dabs=self.import_ui.max_dabs, per_layer=self.import_ui.per_layer)
             self.project_path = None
             self.uv.reset()
             rep_ = self.engine.last_replay
             lines = list(proj.result.notes)
             if rep_ is not None and rep_.truncated:
-                lines.insert(0, f"Very long paint history: replay stopped after {rep_.dabs} brush dabs")
+                lines.insert(0, f"Very long paint history: replay paused at a saved checkpoint after {rep_.dabs} brush dabs")
             if rep_ is not None and rep_.skipped:
-                lines.append(f"{rep_.skipped} strokes didn't land on the mesh and were skipped")
+                lines.append(f"{rep_.skipped} strokes had missing camera data or no surface samples and were skipped")
             n_sets = len(self.engine.sets)
             n_layers = sum(len(list(self.engine.all_layers(ts))) for ts in self.engine.sets)
             summary = (f"{proj.name}: {n_sets} texture set{'s' if n_sets != 1 else ''}, {n_layers} layers, "
@@ -711,7 +794,7 @@ class App:
         if not sel:
             return
         self._release_clip()
-        self.clipboard = [eng._clone_layer(l) for l in sel]
+        self.clipboard = eng.clone_layers(sel)
         for c, l in zip(self.clipboard, sel):
             c.name = l.name
         if cut:
@@ -723,8 +806,8 @@ class App:
         parent, idx = self._insert_point()
         eng._push_undo(eng._snapshot_stack())
         last = None
-        for j, l in enumerate(self.clipboard):
-            c = eng._clone_layer(l)
+        clones = eng.clone_layers(self.clipboard)
+        for j, (l, c) in enumerate(zip(self.clipboard, clones)):
             c.name = l.name
             last = eng.add_layer(layer=c, index=idx + j, parent=parent, record=False)
         if last is not None:
@@ -759,8 +842,7 @@ class App:
                 if k in lay.tex:
                     eng.gpu.blit(t, lay.tex[k])
         else:
-            for k, v in data.items():
-                setattr(lay, k, copy.deepcopy(v))
+            self._edit_properties("Paste layer content", [(lay, copy.deepcopy(data))])
         eng.dirty = True
         self.msg(f"Pasted content into '{lay.name}'")
 
@@ -775,8 +857,7 @@ class App:
         self.msg(f"Grouped {len(sel)} layer{'s' if len(sel) > 1 else ''} into a folder")
 
     def _toggle_mask(self, lay):
-        lay.mask_enabled = not lay.mask_enabled
-        self.engine.dirty = True
+        self._edit_properties("Toggle layer mask", [(lay, {"mask_enabled": not lay.mask_enabled})])
         self.msg(f"Mask of '{lay.name}' {'enabled' if lay.mask_enabled else 'disabled'}  (Shift+click the mask)")
 
     def _use_material(self, name):
@@ -785,10 +866,9 @@ class App:
         col, r, m = MATERIALS[name]
         lay = eng.layer
         if lay is not None and lay.kind == "fill" and eng.brush.target == 0:
-            for l in self._sel_layers():
-                if l.kind == "fill":
-                    l.color, l.rough, l.metal = list(col), r, m
-            eng.dirty = True
+            self._edit_properties("Apply material " + name, [
+                (l, {"color": list(col), "rough": r, "metal": m})
+                for l in self._sel_layers() if l.kind == "fill"])
             self.msg(f"Fill material set to {name}")
         else:
             eng.brush.color, eng.brush.rough, eng.brush.metal = list(col), r, m
@@ -819,12 +899,14 @@ class App:
         if layer is not None and not any(l is layer for l in self._sel_layers()):
             eng.select(layer)
             self._sync_selection()
-        for l in self._sel_layers() or [eng.layer]:
-            l.gen.kind = kind
-        eng.dirty = True
+        self._edit_properties("Apply mask generator", [
+            (l.gen, {"kind": kind}) for l in self._sel_layers() or [eng.layer]])
         self.msg(f"Mask generator: {GENERATORS[kind]}")
 
     def _set_view(self, mode):
+        if self.drag in ("paint", "uvpaint"):
+            self.engine.end_stroke()
+            self.drag = None
         self.view_mode = mode
 
     def _cycle_display(self, modes=None, step=1):
@@ -888,7 +970,11 @@ class App:
         if not self._over(self.vp_rect):
             self.msg("Hover the mesh in the 3D view, then press P to pick the material under the cursor.")
             return
-        vals = self.engine.pick_material(*self._mouse_vp())
+        try:
+            vals = self.engine.pick_material(*self._mouse_vp())
+        except (ValueError, OSError) as error:
+            self.msg("Material pick failed: " + str(error))
+            return
         self.msg("Picked the material under the cursor into the brush." if vals else "Nothing under the cursor to pick.")
 
     def _quick_edit_toggle(self):
@@ -928,6 +1014,9 @@ class App:
         self.open_bake = True
 
     def _close_project(self):
+        self._finish_fill_projection(cancel=True)
+        self.material_ui.transform_tool = None
+        self.material_ui.transform_layer_pid = None
         e = self.engine
         self._release_clip()
         e._release_project()
@@ -1000,9 +1089,11 @@ class App:
               tip="Add a Painter .spsm to the Layer Stack, or apply a .spmsk to the selected layer.")
         R.add("file.save", "Save", "File", self._save, ["Ctrl+S"], has)
         R.add("file.save_as", "Save As...", "File", lambda: self._save(save_as=True), ["Ctrl+Shift+S"], has)
+        self.project_ui.register_commands(R)
         R.add("file.close", "Close Project", "File", lambda: setattr(self, "open_close", True), ["Ctrl+F4"], has)
         R.add("file.export", "Export Textures...", "File", lambda: setattr(self, "open_export", True),
               ["Ctrl+Shift+E", "Ctrl+E"], has)
+        R.add("file.delivery", "Deliver mesh and materials...", "File", lambda:setattr(self.delivery_ui,"open",True), enabled=has)
         R.add("file.bake", "Bake Mesh Maps...", "File", self._open_bake, ["Ctrl+Shift+B"], has)
         R.add("file.quit", "Quit", "File", self._request_quit, ["Alt+F4"])
         R.add("edit.undo", "Undo", "Edit", e.undo, ["Ctrl+Z"], can_undo)
@@ -1121,11 +1212,16 @@ class App:
               lambda: setattr(self, "ui_hidden", not self.ui_hidden), ["Tab"], has, checked=lambda: self.ui_hidden)
         R.add("view.isolate", "Isolate texture set", "Viewport", lambda: setattr(self, "isolate", not self.isolate),
               ["Alt+Q"], multi_sets, checked=lambda: self.isolate)
+        R.add("view.material_tiles", "Material tiles...", "Viewport", lambda: setattr(self.tiles_ui, "open", True), [], has)
+        R.add("view.frame_uv_tiles", "Frame UV tiles", "Viewport", lambda: self.uv.fit_tiles(e, self._uv_input()[0].size), [], has)
         R.add("view.pause", "Pause engine computation", "Viewport",
               lambda: (setattr(self, "paused", not self.paused),
                        self.msg("Engine paused: the viewport stops updating (Shift+Esc resumes)." if self.paused
                                 else "Engine resumed")), ["Shift+Escape"], has, checked=lambda: self.paused)
-        R.add("view.reset_2d", "Reset 2D view", "Viewport", self.uv.reset, [], has)
+        R.add("view.reset_2d", "Reset 2D view", "Viewport",
+              lambda: self.uv.fit_tiles(e, self._uv_input()[0].size) if e.ts.tiles is not None else self.uv.reset(), [], has)
+        R.add("view.uv_wire", "UV wireframe", "Viewport", lambda: setattr(self.uv, "wire", not self.uv.wire), [], has,
+              checked=lambda: self.uv.wire)
 
         # --- Painter shortcuts whose feature doesn't exist yet: listed (and rebindable) so they explain themselves
         manip = "There is no on-screen manipulator yet: hold S and drag (left rotate, middle move, right scale) " \
@@ -1154,6 +1250,9 @@ class App:
         R.add("win.reset", "Reset layout", "Window", self._reset_layout)
         R.add("win.palette", "Command palette", "Window", self.palette.request, ["Ctrl+K"], in_palette=False)
         R.add("help.shortcuts", "Shortcuts and mouse controls", "Help", lambda: self._show_win(W_KEYS, True))
+        R.add("layer.channels", "Channels and shaders...", "Layer", lambda:setattr(self.channels_ui,"open",True))
+        R.add("layer.authored", "Paths, ribbons and text...", "Layer", lambda:setattr(self.authored_ui,"open",True))
+        R.add("assets.import_coverage", "Painter import coverage...", "Assets", lambda: setattr(self.import_ui,"open",True))
         R.add("assets.sp_rescan", "Rescan Substance Painter assets", "Assets",
               lambda: (self._scan_substance(), self.msg(f"Found {len(self.sp_items)} Substance assets")))
         R.add("assets.sp_folder", "Add Substance asset folder...", "Assets", self._add_sp_folder)
@@ -1187,6 +1286,7 @@ class App:
                 except Exception as e:
                     traceback.print_exc()
                     self.msg(f"{label.rstrip('.')} failed: {e}")
+            self.project_ui.tick()
         self._save_settings()
         try:
             if self.ini_path:
@@ -1198,6 +1298,9 @@ class App:
             self.impl.shutdown()
         except Exception:
             pass
+        if hasattr(self, "material_previews"):
+            self.material_previews.release()
+        self.tablet.close()
         glfw.terminate()
 
     def frame(self):
@@ -1232,37 +1335,76 @@ class App:
         self.extra_dialogs()
         self.quick_brush()
         self.palette.draw(self.reg, self.msg, self.ui_scale)
+        if getattr(self, "_property_edit_key", None) is not None and not imgui.is_any_item_active():
+            self._finish_property_edit(cancel=imgui.is_key_pressed(imgui.Key.escape))
         if self.pending:
             self.busy_overlay(ww, wh)
             self._pending_shown += 1
         if not self.pending:
             self.shortcuts()
             if has_project:
-                self.viewport_input()
+                try:
+                    self.viewport_input()
+                except MemoryError as error:
+                    self._memory_failure(error)
 
         self.ctx.screen.use()
         self.ctx.viewport = (0, 0, fw, fh)
         self.ctx.clear(0.08, 0.085, 0.09)
-        if has_project:
-            sx, sy = self.fb_scale
-            vx, vy, vw, vh = self.vp_rect
-            if vw > 1 and vh > 1:
-                rect = (int(vx * sx), int((wh - vy - vh) * sy), int(vw * sx), int(vh * sy))
-                self.engine.update_view(rect[2], rect[3])
-                if self.drag == "paint":      # stroke follows the cursor every frame
-                    self._paint_at_cursor()
-                self.cursor = self._pick_cursor() if self.drag in (None, "paint") else None
-                self.ctx.screen.use()
-                self._render_3d(rect, self.cursor if self._cursor_visible() else None)
-            ux, uy, uw, uh = self.uv_rect
-            if uw > 1 and uh > 1:
-                self.uv.render(self.engine, (int(ux * sx), int((wh - uy - uh) * sy), int(uw * sx), int(uh * sy)))
-        self.ctx.screen.use()
-        self.ctx.viewport = (0, 0, fw, fh)
-        imgui.render()
-        self._apply_cursor()
-        self._drain_gl_errors()
-        self.impl.render(imgui.get_draw_data())
+        if has_project and not getattr(self, "_memory_error", None):
+            try:
+                self._render_views(wh)
+                self._authored_error=None
+            except authored_model.AuthoredResourceError as error:
+                if str(error)!=getattr(self,"_authored_error",None):self.msg(str(error))
+                self._authored_error=str(error)
+            except MemoryError as error:
+                self._memory_failure(error)
+        try:
+            # Prepare tile thumbnails after shortcuts and viewport edits; their
+            # texture leases must remain pinned until ImGui submits its draws.
+            self.tiles_ui.draw()
+            self.ctx.screen.use()
+            self.ctx.viewport = (0, 0, fw, fh)
+            imgui.render()
+            self._apply_cursor()
+            self._drain_gl_errors()
+            self.impl.render(imgui.get_draw_data())
+        finally:
+            self.tiles_ui.finish_frame()
+            if hasattr(self, "material_previews"):
+                self.material_previews.finish_frame()
+
+    def _memory_failure(self, error):
+        self.engine.cancel_stroke()
+        self.drag = None
+        self._memory_error = str(error)
+        self.msg(str(error) + "; adjust Memory and history settings to resume the preview.")
+
+    def _render_views(self, wh):
+        sx, sy = self.fb_scale
+        if self.drag == "uvpaint":
+            self._paint_uv_at_cursor()
+        vx, vy, vw, vh = self.vp_rect
+        if vw > 1 and vh > 1:
+            rect = (int(vx * sx), int((wh - vy - vh) * sy), int(vw * sx), int(vh * sy))
+            self.engine.update_view(rect[2], rect[3])
+            if self.drag == "paint":      # stroke follows the cursor every frame
+                self._paint_at_cursor()
+            self.cursor = self._pick_cursor() if self.drag in (None, "paint") else None
+            self.ctx.screen.use()
+            self._render_3d(rect, self.cursor if self._cursor_visible() else None)
+        ux, uy, uw, uh = self.uv_rect
+        if uw > 1 and uh > 1:
+            self.ctx.screen.use()
+            self.uv.render(self.engine, (int(ux * sx), int((wh - uy - uh) * sy), int(uw * sx), int(uh * sy)), refresh=not self.paused)
+            diagnostics = self.uv.diagnostics
+            if diagnostics and diagnostics != getattr(self, "_uv_tile_report", None):
+                self.msg("UV tile preview: " + "; ".join(f"{item['udim']}: {item['message']}" for item in diagnostics))
+            elif not diagnostics and getattr(self, "_uv_tile_report", None):
+                self.msg("UV tile preview refreshed.")
+            self._uv_tile_report = diagnostics
+            self._draw_uv_cursor()
 
     _CURSOR_SHAPES = {   # ImGui cursor -> GLFW standard cursors to try (the first one this GLFW has wins)
         "text_input": ("IBEAM_CURSOR",),
@@ -1317,11 +1459,20 @@ class App:
             r.mode = 6
         self.ctx.screen.use()
         sets = [(ts.key, ts.comp, ts.bakes) for i, ts in enumerate(e.sets)
-                if ts.comp is not None and (not self.isolate or i == e.active)]
-        r.render_sets(e.gm, e.camera, e._vp, sets, rect)
+                if ts.visible and ts.comp is not None and (not self.isolate or i == e.active)]
+        if any(ts.tiles is not None for i, ts in enumerate(e.sets) if ts.visible and (not self.isolate or i == e.active)):
+            diagnostics = e.render_materials(rect, [e.active] if self.isolate else None, refresh=not self.paused)
+            if diagnostics and diagnostics != getattr(self, "_tile_render_report", None):
+                self.msg("Tiled preview: " + "; ".join(f"{item['udim']}: {item['message']}" for item in diagnostics))
+            elif not diagnostics and getattr(self, "_tile_render_report", None):
+                self.msg("Tiled preview refreshed.")
+            self._tile_render_report = diagnostics
+        else:
+            r.render_sets(e.gm, e.camera, e._vp, sets, rect)
         r.mode = mode
         if self.poly_fill and sets:
             self._draw_fill_wire(rect, cursor)
+        r.draw_symmetry(e.gm, e._vp, rect, e.brush, [key for key, _, _ in sets])
         if cursor is not None:
             hit, nrm = cursor
             r.draw_cursor(hit, nrm, e.brush_radius(hit), e._vp, rect)
@@ -1330,8 +1481,9 @@ class App:
         """Polygon fill shows the mesh's faces and edges, and tints what a click would fill."""
         e = self.engine
         topo = e.mesh.topology
-        only = e.ts.tri_ids if (self.isolate and e.ts is not None) else None
-        key = (id(e.mesh), e.active if only is not None else None)
+        visible = tuple(i for i, ts in enumerate(e.sets) if ts.visible and (not self.isolate or i == e.active))
+        only = np.concatenate([e.sets[i].tri_ids for i in visible]) if visible else np.empty(0, np.int64)
+        key = (id(e.mesh), visible)
         hl = None
         tri = (e._last_pick or {}).get("tri", -1) if cursor is not None else -1
         if 0 <= tri < topo.n_tris and e.ts is not None:
@@ -1549,49 +1701,94 @@ class App:
         imgui.set_next_item_width(-1)
         return True
 
+    def _finish_property_edit(self, cancel=False):
+        if getattr(self, "_property_edit_key", None) is not None:
+            if self.engine.edit_active:
+                (self.engine.cancel_edit if cancel else self.engine.commit_edit)()
+            self._property_edit_key = None
+
+    def _edit_value(self, label, obj, attr, value, changed, multi=False, continuous=False):
+        """One document transaction per gesture, including multi-layer controls."""
+        eng = self.engine
+        targets = self._sel_layers() if multi else [obj]
+        if not any(target is obj for target in targets):
+            targets = [obj] + targets
+        targets = list({id(target): target for target in targets}.values())
+        key = (id(obj), attr, label)
+        active = imgui.is_item_active() if continuous else False
+        deactivated = imgui.is_item_deactivated() if continuous else False
+        if changed:
+            if getattr(self, "_property_edit_key", None) not in (None, key):
+                self._finish_property_edit()
+            if not eng.edit_active:
+                eng.begin_edit(targets, label=label)
+            for target in targets:
+                eng.set_property(target, attr, copy.deepcopy(value))
+            if continuous:
+                self._property_edit_key = key
+            else:
+                eng.commit_edit()
+        if continuous and getattr(self, "_property_edit_key", None) == key:
+            if imgui.is_key_pressed(imgui.Key.escape):
+                self._finish_property_edit(cancel=True)
+            elif deactivated or (changed and not active):
+                self._finish_property_edit()
+
+    def _edit_properties(self, label, changes):
+        """Commit a discrete compound action using the same engine edit contract."""
+        self._finish_property_edit()
+        self.engine.begin_edit([obj for obj, _ in changes], label=label)
+        try:
+            for obj, values in changes:
+                self.engine.set_properties(obj, **values)
+            return self.engine.commit_edit()
+        except Exception:
+            self.engine.cancel_edit()
+            raise
+
     def p_slider(self, label, obj, attr, lo=0.0, hi=1.0, fmt="%.2f", dirty=False, log=False, tip="", multi=False):
         if not self._row(label, tip):
             return
         flags = imgui.SliderFlags_.logarithmic if log else 0
         ch, v = imgui.slider_float("##" + label, float(getattr(obj, attr)), lo, hi, fmt, flags)
+        if dirty:
+            self._edit_value(label, obj, attr, v, ch, multi=multi, continuous=True)
         _tip(tip + ("\n" if tip else "") + "Ctrl+click to type a value.")
-        if ch:
+        if ch and not dirty:
             setattr(obj, attr, v)
             if multi:
                 for l in self._sel_layers():
                     setattr(l, attr, v)
-            if dirty:
-                self.engine.dirty = True
 
     def p_combo(self, label, obj, attr, items, dirty=True, tip="", multi=False):
         if not self._row(label, tip):
             return
         ch, v = imgui.combo("##" + label, int(getattr(obj, attr)), items)
-        if ch:
+        if dirty:
+            self._edit_value(label, obj, attr, v, ch, multi=multi)
+        elif ch:
             setattr(obj, attr, v)
             if multi:
                 for l in self._sel_layers():
                     setattr(l, attr, v)
-            if dirty:
-                self.engine.dirty = True
 
     def p_color(self, label, obj, attr, dirty=False, tip=""):
         if not self._row(label, tip):
             return
-        ch, c = imgui.color_edit3("##" + label, list(getattr(obj, attr)))
-        if ch:
+        ch, c = imgui.color_edit3("##" + label, list(getattr(obj, attr)), imgui.ColorEditFlags_.no_inputs)
+        if dirty:
+            self._edit_value(label, obj, attr, list(c), ch, continuous=True)
+        elif ch:
             setattr(obj, attr, list(c))
-            if dirty:
-                self.engine.dirty = True
 
     def p_check(self, label, obj, attr, dirty=True, tip=""):
         if not self._row(label, tip):
             return
         ch, v = imgui.checkbox("##" + label, bool(getattr(obj, attr)))
-        if ch:
+        if dirty:
+            self._edit_value(label, obj, attr, v, ch)
+        elif ch:
             setattr(obj, attr, v)
-            if dirty:
-                self.engine.dirty = True
 
     def p_channels(self, label, obj, dirty, multi=False, tip=""):
         if not self._row(label, tip):
@@ -1608,12 +1805,18 @@ class App:
                 imgui.push_style_color(imgui.Col_.text, V4(*TEXT_DIM, 1))
             if imgui.button(f"{name}##ch{i}", V2(w, 0)):
                 en[i] = not on
-                obj.enabled = list(en)
-                if multi:
-                    for l in self._sel_layers():
-                        e2 = list(l.enabled); e2[i] = en[i]; l.enabled = e2
                 if dirty:
-                    self.engine.dirty = True
+                    changes = []
+                    targets = self._sel_layers() if multi else [obj]
+                    if not any(target is obj for target in targets):
+                        targets = [obj] + targets
+                    for target in targets:
+                        enabled = list(target.enabled)
+                        enabled[i] = en[i]
+                        changes.append((target, {"enabled": enabled}))
+                    self._edit_properties("Toggle " + name, changes)
+                else:
+                    obj.enabled = list(en)
             imgui.pop_style_color()
             _tip(f"{name} channel {'on' if on else 'off'}: click to toggle")
 
@@ -1624,6 +1827,10 @@ class App:
     def _sync_selection(self):
         eng = self.engine
         prim = eng.layer
+        if (self.material_ui.transform_tool and
+                (prim is None or prim.pid != self.material_ui.transform_layer_pid or (not prim.maps and prim.authored is None))):
+            self._finish_fill_projection(cancel=True)
+            self.material_ui.transform_tool = None
         if prim is None:
             self.sel_uids, self._last_primary = set(), None
             return
@@ -1678,7 +1885,8 @@ class App:
             h = imgui.get_window_size().y
             if imgui.begin_menu("File"):
                 for cid in ("file.new", "file.open", None, "file.import_spp", "file.import_preset", None,
-                            "file.save", "file.save_as", None, "file.export", None, "file.quit"):
+                            "file.save", "file.save_as", "file.save_portable", "file.resources", "file.recover",
+                            "file.autosave", None, "file.export", "file.delivery", None, "file.quit"):
                     imgui.separator() if cid is None else self._menu_cmd(cid)
                 imgui.end_menu()
             if imgui.begin_menu("Edit"):
@@ -1703,6 +1911,9 @@ class App:
                     imgui.end_menu()
                 imgui.separator()
                 self._menu_cmd("layer.clear")
+                imgui.separator()
+                self._menu_cmd("layer.authored")
+                self._menu_cmd("layer.channels")
                 imgui.end_menu()
             if imgui.begin_menu("Viewport"):
                 if imgui.begin_menu("Display channel"):
@@ -1713,7 +1924,8 @@ class App:
                         self._menu_cmd(cid)
                     imgui.end_menu()
                 imgui.separator()
-                for cid in ("view.split", "view.3d", "view.2d", None, "view.frame", "view.reset_2d", "view.hide_ui"):
+                for cid in ("view.split", "view.3d", "view.2d", None, "view.frame", "view.reset_2d", "view.frame_uv_tiles",
+                            "view.material_tiles", "view.uv_wire", "view.hide_ui"):
                     imgui.separator() if cid is None else self._menu_cmd(cid)
                 imgui.separator()
                 self._menu_cmd("win." + W_DISPLAY, "Display settings...")
@@ -1728,6 +1940,14 @@ class App:
                 self._menu_cmd("win.reset", "Reset layout")
                 self._menu_cmd("win.palette", "Command palette...")
                 imgui.end_menu()
+            extension_menus = {}
+            for cid in self.reg.order:
+                if cid.startswith("extension."):
+                    extension_menus.setdefault(self.reg[cid].category, []).append(cid)
+            for category, commands in extension_menus.items():
+                if imgui.begin_menu(category):
+                    for cid in commands:self._menu_cmd(cid)
+                    imgui.end_menu()
             if imgui.begin_menu("Help"):
                 self._menu_cmd("help.shortcuts")
                 self._menu_cmd("win.palette", "Find any command...")
@@ -1899,7 +2119,8 @@ class App:
                          (W_PROPS, self.properties_panel)):
             if not self.show[name]:
                 continue
-            if name == W_LAYERS and self._focus_layers:
+            if (name == W_LAYERS and self._focus_layers
+                    and not imgui.is_popup_open("", imgui.PopupFlags_.any_popup_id | imgui.PopupFlags_.any_popup_level)):
                 imgui.set_next_window_focus()      # Layer Stack is the front tab, as in Painter
                 self._focus_layers -= 1
             imgui.begin(name, None)                # docked panels close from the Window menu only
@@ -1930,6 +2151,7 @@ class App:
         tabs = [("Smart", "smart", "Smart materials: ready-made layer stacks"),
                 ("Materials", "mat", "Single materials"),
                 ("Generators", "gen", "Mask generators driven by the baked mesh maps"),
+                ("Native", "native", "Portable native materials, masks, brushes and export templates"),
                 ("Substance", "substance", "Smart materials and smart masks from Substance 3D Painter\n"
                                            "(your shelf and Painter's starter assets)")]
         kind = getattr(self, "asset_tab", "smart")
@@ -1955,6 +2177,9 @@ class App:
         _tip("Thumbnail size")
         if kind == "substance":
             self._substance_assets()
+            return
+        if kind == "native":
+            self.native_ui.draw()
             return
         hint = {"smart": "Double-click or drag onto the Layer Stack.",
                 "mat": "Click: use for brush / selected fill.  Double-click or drag: new fill layer.",
@@ -2135,30 +2360,28 @@ class App:
             imgui.end_tooltip()
         imgui.pop_id()
 
+    def _sphere_preview(self, dl, layers, p, t):
+        if not hasattr(self, "material_previews"):
+            self.material_previews = MaterialPreviews(self.engine)
+        try:
+            texture = self.material_previews.texture(layers)
+            dl.add_image(imgui.ImTextureRef(texture.glo), p, V2(p.x + t, p.y + t), V2(0, 1), V2(1, 0))
+        except Exception as error:
+            message = f"Material preview failed: {error}"
+            if message != getattr(self, "_material_preview_error", None):
+                self.msg(message)
+                self._material_preview_error = message
+
     def _ball(self, dl, cx, cy, r, col, rough=0.5, metal=0.0):
-        col = [float(c) for c in col]
-        dl.add_circle_filled(V2(cx, cy), r, col32(*[c * 0.42 for c in col]), 40)
-        dl.add_circle_filled(V2(cx - r * 0.1, cy - r * 0.1), r * 0.87, col32(*col), 40)
-        spec = (0.18 + 0.75 * (1 - rough)) * (0.85 if metal > 0.5 else 0.6)
-        dl.add_circle_filled(V2(cx - r * 0.38, cy - r * 0.4), r * (0.1 + 0.22 * rough), col32(1, 1, 1, spec), 24)
+        # Also used for the placeholder while a Substance thumbnail loads.
+        layer = preset_fill("Preview", "Steel", color=list(col), rough=rough, metal=metal, seed=0.0)
+        self._sphere_preview(dl, [layer], V2(cx - r / 0.72, cy - r / 0.72), r * 2 / 0.72)
 
     def _draw_asset_thumb(self, dl, kind, key, p, t):
-        cx, cy, r = p.x + t / 2, p.y + t / 2, t * 0.36
         if kind == "mat":
-            c, rough, metal = MATERIALS[key]
-            self._ball(dl, cx, cy, r, c, rough, metal)
+            self._sphere_preview(dl, [preset_fill(key, key, seed=0.0)], p, t)
         elif kind == "smart":
-            layers = self._smart_cache[key]
-            base = layers[0]
-            self._ball(dl, cx, cy, r, base.color, base.rough, base.metal)
-            rng = np.random.default_rng(abs(hash(key)) % (2 ** 32))
-            for lay in layers[1:]:
-                rim = lay.gen.kind == 1
-                for _ in range(7):
-                    a = rng.uniform(0, 2 * np.pi)
-                    d = r * (rng.uniform(0.7, 0.9) if rim else rng.uniform(0.1, 0.75))
-                    dl.add_circle_filled(V2(cx + np.cos(a) * d, cy + np.sin(a) * d), r * rng.uniform(0.08, 0.18),
-                                         col32(*lay.color, 0.9 * lay.opacity), 12)
+            self._sphere_preview(dl, self._smart_cache[key], p, t)
         else:
             m = t * 0.14
             a, b = V2(p.x + m, p.y + m), V2(p.x + t - m, p.y + t - m)
@@ -2189,6 +2412,10 @@ class App:
     def texset_panel(self):
         eng = self.engine
         for i, ts in enumerate(eng.sets):
+            if imgui.button((ICON.eye if ts.visible else ICON.eye_off) + f"##ts_visibility_{i}"):
+                ts.visible = not ts.visible
+            _tip("Hide in 3D scene" if ts.visible else "Show in 3D scene")
+            imgui.same_line()
             label = f"{ICON.box}  {ts.name}##ts{i}"
             if imgui.selectable(label, i == eng.active)[0] and i != eng.active:
                 eng.set_active(i)
@@ -2203,18 +2430,20 @@ class App:
     def texset_settings_panel(self):
         eng = self.engine
         self._flt = ""
+        if imgui.button("Material tiles..."):
+            self.tiles_ui.open = True
         if self._section("Texture set", ["Resolution", "Normal from height"]):
-            if self._row("Resolution", "Chosen when the project is created (File > New Project)."):
-                imgui.text(f"{eng.res} x {eng.res}")
+            self.material_ui.texture_set_resolution()
             self.p_slider("Normal from height", eng, "normal_strength", 0.0, 5.0, dirty=True,
                           tip="How strongly the height channel turns into normal-map detail.")
             self._end_section()
         if self._section("Channels", []):
-            for i, name in ((1, "Base color"), (2, "Roughness"), (3, "Metallic"), (4, "Height"), (5, "Normal")):
-                if self._row(name):
+            for channel, i in zip(CHANNEL_DESCRIPTORS, CHANNEL_MODES):
+                if self._row(channel.value_label):
                     if imgui.small_button(f"View##ch{i}"):
                         eng.renderer.mode, eng.dirty = i, True
             self._end_section()
+        self.bake_ui.mesh_maps()
         if self._section("Mesh maps (baked)", []):
             for name, mode, tip in (("Ambient occlusion", 7, "Drives Dirt / AO generators"),
                                     ("Curvature", 8, "Drives Edge Wear"),
@@ -2277,7 +2506,7 @@ class App:
         dl = imgui.get_window_draw_list()
         rows = self._flat()
         row_layers = [r[0] for r in rows]
-        drop_asset = drop_layer = drop_sp = None
+        drop_asset = drop_layer = drop_sp = drop_native = None
         io = imgui.get_io()
         for lay, depth, parent in rows:
             imgui.push_id(str(lay.uid))
@@ -2303,6 +2532,9 @@ class App:
                 pl = imgui.accept_drag_drop_payload_py_id("STRATA_SP")
                 if pl is not None:
                     drop_sp = (pl.data_id, lay)
+                pl = imgui.accept_drag_drop_payload_py_id("STRATA_NATIVE")
+                if pl is not None:
+                    drop_native = (pl.data_id, lay)
                 imgui.end_drag_drop_target()
             if imgui.begin_popup_context_item("##ctx"):
                 _esc_closes()
@@ -2331,9 +2563,8 @@ class App:
             imgui.push_style_color(imgui.Col_.button, V4(0, 0, 0, 0))
             if imgui.button(ICON.eye if lay.visible else ICON.eye_off, V2(fh, fh)):
                 v = not lay.visible
-                for l in (self._sel_layers() if selected else [lay]):
-                    l.visible = v
-                eng.dirty = True
+                self._edit_properties("Toggle layer visibility", [
+                    (l, {"visible": v}) for l in (self._sel_layers() if selected else [lay])])
             _tip("Show / hide layer")
             x += fh + 2 * s + depth * indent
             # folder: expand arrow
@@ -2386,16 +2617,10 @@ class App:
                 _esc_closes()
                 imgui.set_next_item_width(180 * s)
                 ch, v = imgui.combo("Blend", lay.blend, BLEND_MODES)
-                if ch:
-                    for l in self._sel_layers():
-                        l.blend = v
-                    eng.dirty = True
+                self._edit_value("Layer blend", lay, "blend", v, ch, multi=True)
                 imgui.set_next_item_width(180 * s)
                 ch, v = imgui.slider_float("Opacity", lay.opacity, 0, 1, "%.2f")
-                if ch:
-                    for l in self._sel_layers():
-                        l.opacity = v
-                    eng.dirty = True
+                self._edit_value("Layer opacity", lay, "opacity", v, ch, multi=True, continuous=True)
                 imgui.end_popup()
             name_w = bx - x - 4 * s
             if self.renaming == lay.uid:
@@ -2410,7 +2635,7 @@ class App:
                     self.renaming = None
                 elif enter or imgui.is_item_deactivated():
                     if self.rename_buf.strip():
-                        lay.name = self.rename_buf.strip()
+                        self._edit_properties("Rename layer", [(lay, {"name": self.rename_buf.strip()})])
                     self.renaming = None
             else:
                 tcol = imgui.get_color_u32(imgui.Col_.text) if lay.visible else col32(*TEXT_DIM)
@@ -2439,6 +2664,9 @@ class App:
             pl = imgui.accept_drag_drop_payload_py_id("STRATA_SP")
             if pl is not None:
                 drop_sp = (pl.data_id, None)
+            pl = imgui.accept_drag_drop_payload_py_id("STRATA_NATIVE")
+            if pl is not None:
+                drop_native = (pl.data_id, None)
             pl = imgui.accept_drag_drop_payload_py_id("STRATA_LAYER")
             if pl is not None:
                 drop_layer = (pl.data_id, None)
@@ -2470,6 +2698,8 @@ class App:
                 self._apply_generator(key, layer=dst)
             else:
                 self.msg("Drop a mask generator onto a layer.")
+        if drop_native is not None:
+            self.native_ui.drop(*drop_native)
         if drop_sp is not None and 0 <= drop_sp[0] < len(self.sp_items):
             it, dst = self.sp_items[drop_sp[0]], drop_sp[1]
             if it.kind == "smart_material":
@@ -2513,7 +2743,7 @@ class App:
             dl.add_text(V2(x + (ts - gs.x) / 2, y + (ts - gs.y) / 2), col32(*FILL_COL), g)
         elif lay.kind == "fill":
             dl.add_rect_filled(a, b, col32(0.1, 0.1, 0.11), 3)
-            self._ball(dl, x + ts / 2, y + ts / 2, ts * 0.42, lay.color, lay.rough, lay.metal)
+            self._sphere_preview(dl, [lay], a, ts)
         else:
             h = ts / 2
             for i in range(2):
@@ -2551,6 +2781,8 @@ class App:
             crumb = f"{eng.mesh.name}  >  Brush"
         else:
             part = "Mask" if b.target == 1 else ("Paint" if lay.kind == "paint" else "Fill")
+            if b.target == 1 and eng.active_mask_paint() is not None:
+                part += " > " + eng.active_mask_paint().name
             crumb = f"{eng.mesh.name}  >  {lay.name}  >  {part}"
         imgui.text_disabled(_ellipsize(crumb, imgui.get_content_region_avail().x))
         n_sel = len(self.sel_uids)
@@ -2578,6 +2810,7 @@ class App:
         if lay is not None:
             self._props_layer(lay)
             self._props_mask(lay)
+            self.effects_ui.draw(lay)
         if self._flt and not imgui.is_any_item_hovered() and imgui.get_cursor_pos_y() < 30 * s:
             imgui.text_disabled("No property matches.")
         imgui.end_child()
@@ -2589,10 +2822,26 @@ class App:
         r = pfd.open_file(title, "", ["Images", "*.png *.jpg *.jpeg *.tga *.tif *.tiff *.exr *.hdr *.bmp *.webp"]).result()
         return r[0] if r else ""
 
+    def _load_mesh_file(self, title):
+        if pfd is None:
+            self.msg("Native file dialog is unavailable.")
+            return ""
+        result = pfd.open_file(title, "", ["Meshes", "*.obj *.fbx *.gltf *.glb *.ply *.stl"]).result()
+        return result[0] if result else ""
+
+    def _load_native_file(self):
+        if pfd is None:
+            return ""
+        result = pfd.open_file("Native asset", "", ["Strata assets", "*.ssmat *.ssmask *.sbrush *.json"]).result()
+        return result[0] if result else ""
+
     def _props_brush(self):
         e, b = self.engine, self.engine.brush
         labels = ["Tool", "Fill mode", "Size", "Hardness", "Flow", "Spacing", "Angle", "Grain", "Grain scale",
-                  "Strength", "Clone source", "Lazy mouse", "Symmetry", "Axis", "Copies"]
+                  "Strength", "Clone source", "Lazy mouse", "Symmetry", "Axis", "Copies", "Size space",
+                  "Alpha", "Invert alpha", "Stroke opacity", "Alignment", "Backface angle", "Follow angle",
+                  "Size jitter", "Flow jitter", "Angle jitter", "Position jitter", "Pressure size", "Pressure flow",
+                  "Minimum size", "Minimum flow", "Jitter seed", "Symmetry center", "Tablet input", "2D alignment"]
         if self._section("Brush", labels):
             tools = [("Paint", "tool.paint"), ("Eraser", "tool.erase"), ("Projection", "tool.projection"),
                      ("Polygon fill", "tool.fill"), ("Smudge", "tool.smudge"), ("Clone (relative)", "tool.clone"),
@@ -2605,6 +2854,8 @@ class App:
             if self.poly_fill:
                 if self._row("Fill mode", "What one click fills"):
                     _, self.fill_mode = imgui.combo("##fillmode", self.fill_mode, FILL_MODES)
+                if e.ts.tiles is not None:
+                    imgui.text_wrapped(f"Tiled fill rasterizes this paint target at {e.res}px. Later resizing resamples it.")
             else:
                 if self._row("Size space", "World: the brush covers the same area of the mesh at any zoom\n"
                                            "Screen: the brush keeps the same size on screen\n"
@@ -2619,6 +2870,7 @@ class App:
                 self.p_slider("Hardness", b, "hardness", tip="Ctrl+Right drag vertically")
                 self.p_slider("Flow", b, "flow", tip="Ctrl+Left drag")
                 self.p_slider("Spacing", b, "spacing", 0.02, 1.0, tip="Distance between dabs, relative to size")
+                self._advanced_brush()
                 self.p_slider("Angle", b, "angle", 0.0, 360.0, "%.0f deg", tip="Ctrl+Left drag vertically")
                 self.p_slider("Grain", b, "grain", tip="Breaks the dab up with noise")
                 if b.grain > 0:
@@ -2626,7 +2878,7 @@ class App:
                 if b.tool == TOOL_SMUDGE:
                     self.p_slider("Strength", b, "smudge_strength", tip="How far paint is dragged")
                 if b.tool == TOOL_CLONE and self._row("Clone source", "Hold V and click on the model"):
-                    imgui.text_disabled("set  (V + click to move it)" if e.clone_source is not None else "V + click to set")
+                    imgui.text_disabled("set  (V + click to move it)" if e.clone_source is not None or e.clone_uv_source is not None else "V + click to set")
             if self._row("Lazy mouse", "D toggles. 0 = off"):
                 ch, v = imgui.slider_float("##lazy", float(b.lazy), 0, 200, "%.0f px" if b.lazy else "off")
                 if ch:
@@ -2638,6 +2890,10 @@ class App:
                                            (imgui.get_content_region_avail().x - 2) / 3)
                 if b.symmetry == 2 and self._row("Copies"):
                     _, b.radial_count = imgui.slider_int("##radial", int(b.radial_count), 2, 32)
+                if self._row("Symmetry center", "Center in normalized object coordinates"):
+                    ch, v = imgui.input_float3("##symcenter", b.sym_center)
+                    if ch and all(math.isfinite(x) for x in v):
+                        b.sym_center = list(v)
             self._end_section()
         labels = ["Stencil image", "Ignore stencil", "Tiling"]
         if self._section("Stencil", labels, default_open=bool(b.stencil)):
@@ -2662,35 +2918,103 @@ class App:
                 imgui.text_disabled("S + Left drag rotate, Middle move, Right scale")
             self._end_section()
         if b.tool == TOOL_PROJECTION and not self.poly_fill:
-            if self._section("Projection", ["Image", "Tiling"]):
-                if self._row("Image", "Colour image projected from the screen. Place it with S + mouse."):
-                    cur = b.proj_maps.get("C")
-                    bw = (imgui.get_content_region_avail().x - 2) / 2
-                    if imgui.button("Load..." if not cur else os.path.basename(cur)[:18], V2(bw, 0)):
-                        p = self._load_image("Projection image")
+            if self._section("Projection", [c.value_label + " image" for c in CHANNEL_DESCRIPTORS] + ["Tiling"]):
+                for channel in CHANNEL_DESCRIPTORS:
+                    if not self._row(channel.value_label + " image", "Screen projection. Place it with S + mouse."):
+                        continue
+                    imgui.push_id("projection_" + channel.key)
+                    cur = b.proj_maps.get(channel.key)
+                    if imgui.button(os.path.basename(cur)[:18] if cur else "Load..."):
+                        p = self._load_image(channel.value_label + " projection")
                         if p:
-                            b.proj_maps = {**b.proj_maps, "C": p}
-                            b.proj_xform = [0.5, 0.5, 1.0, 0.0]
-                    imgui.same_line(0, 2)
-                    imgui.begin_disabled(not b.proj_maps)
-                    if imgui.button("Clear##pj", V2(-1, 0)):
-                        b.proj_maps = {}
-                    imgui.end_disabled()
+                            try:
+                                e.resources.texture(p, channel.resource_kind)
+                                b.proj_maps = {**b.proj_maps, channel.key: p}
+                                b.enabled[channel.index] = True
+                            except Exception as error:
+                                self.msg(f"Projection image failed: {error}")
+                    imgui.same_line()
+                    if imgui.button("Clear##pj"):
+                        b.proj_maps.pop(channel.key, None)
+                    imgui.pop_id()
                 self.p_combo("Tiling", b, "proj_tiling", STENCIL_TILING, dirty=False)
                 imgui.text_disabled("S + Left drag rotate, Middle move, Right scale")
                 self._end_section()
 
+    def _advanced_brush(self):
+        b = self.engine.brush
+        if self._row("Alpha", "Round, built-in shape, or an image file"):
+            choices = ["Round"] + BUILTIN_ALPHAS + ["Image..."]
+            name = (b.alpha or "").removeprefix("builtin:")
+            cur = BUILTIN_ALPHAS.index(name) + 1 if name in BUILTIN_ALPHAS else (len(choices) - 1 if b.alpha else 0)
+            ch, v = imgui.combo("##alpha", cur, choices)
+            if ch:
+                if v == len(choices) - 1:
+                    path = self._load_image("Brush alpha")
+                    if path:
+                        try:
+                            self.engine.resources.alpha(path)
+                            b.alpha = path
+                        except Exception as error:
+                            self.msg(f"Alpha image failed: {error}")
+                else:
+                    b.alpha = "builtin:" + choices[v] if v else None
+            if b.alpha and cur == len(choices) - 1:
+                imgui.text_disabled(os.path.basename(b.alpha))
+        self.p_check("Invert alpha", b, "alpha_invert", dirty=False)
+        if b.tool in (TOOL_SMUDGE, TOOL_CLONE):
+            if self._row("Stroke opacity"):
+                imgui.text_wrapped("Use Flow for clone/smudge; stroke opacity applies to paint/projection.")
+        else:
+            self.p_slider("Stroke opacity", b, "stroke_opacity")
+        if self._row("2D alignment"):
+            imgui.text_wrapped("UV strokes align in texture space. Object symmetry and polygon fill use 3D.")
+        self.p_combo("Alignment", b, "alignment", ALIGNMENTS, dirty=False, tip="3D alignment; 2D strokes always align in UV space")
+        self.p_slider("Backface angle", b, "backface", 1, 180, "%.0f deg")
+        self.p_check("Follow angle", b, "follow_path", dirty=False)
+        for label, attr in (("Size jitter", "size_jitter"), ("Flow jitter", "flow_jitter"),
+                            ("Angle jitter", "angle_jitter"), ("Position jitter", "pos_jitter")):
+            self.p_slider(label, b, attr)
+        if self._row("Jitter seed", "Same seed and samples reproduce the same jitter; frozen at stroke start"):
+            ch, value = imgui.input_int("##seed", int(b.seed))
+            if ch:
+                b.seed = value % (2 ** 31)
+        self.p_check("Pressure size", b, "pressure_size", dirty=False)
+        self.p_slider("Minimum size", b, "min_size", tip="Size fraction at zero pressure")
+        self.p_check("Pressure flow", b, "pressure_flow", dirty=False)
+        self.p_slider("Minimum flow", b, "min_flow", tip="Flow fraction at zero pressure")
+        if self._row("Tablet input"):
+            imgui.text_wrapped(self.tablet.status)
+            imgui.text_disabled(f"{self.tablet.source}: {self.tablet.pressure:.2f}")
+
     def _props_brush_material(self):
         b = self.engine.brush
-        labels = ["Channels", "Color", "Roughness", "Metallic", "Height"]
+        labels = ["Channels"] + [channel.value_label for channel in CHANNEL_DESCRIPTORS]
         if not self._section("Material (brush)", labels):
             return
+        size = 100 * self.ui_scale
+        p = imgui.get_cursor_screen_pos()
+        self._sphere_preview(imgui.get_window_draw_list(), [MaterialPreviews.material(b)], p, size)
+        imgui.dummy(V2(size, size))
         self.p_channels("Channels", b, False, tip="Which channels the brush paints")
-        self.p_color("Color", b, "color")
-        self.p_slider("Roughness", b, "rough")
-        self.p_slider("Metallic", b, "metal")
-        self.p_slider("Height", b, "height", tip="0.5 = flat, above 0.5 raised, below carved")
+        self._material_channels(b, dirty=False)
         self._end_section()
+
+    def _material_channels(self, obj, dirty):
+        for channel in CHANNEL_DESCRIPTORS:
+            tip = channel.semantic
+            if channel.key == "H":
+                tip = "0.5 = flat, above 0.5 raised, below carved"
+            elif channel.key == "N":
+                tip = "Encoded tangent-space normal: (0.5, 0.5, 1) is flat"
+            elif channel.key == "O":
+                tip = "Opacity channel value; layer opacity controls the whole layer separately"
+            imgui.begin_disabled(bool(getattr(obj, "maps", {}).get(channel.key)))
+            if channel.value_components == 3:
+                self.p_color(channel.value_label, obj, channel.attribute, dirty=dirty, tip=tip)
+            else:
+                self.p_slider(channel.value_label, obj, channel.attribute, dirty=dirty, tip=tip)
+            imgui.end_disabled()
 
     def _props_mask_paint(self):
         b = self.engine.brush
@@ -2703,13 +3027,12 @@ class App:
         self._end_section()
 
     def _props_fill(self, lay):
-        labels = ["Color", "Roughness", "Metallic", "Height"]
+        labels = [channel.value_label for channel in CHANNEL_DESCRIPTORS]
         if self._section("Fill material", labels):
-            self.p_color("Color", lay, "color", dirty=True)
-            self.p_slider("Roughness", lay, "rough", dirty=True)
-            self.p_slider("Metallic", lay, "metal", dirty=True)
-            self.p_slider("Height", lay, "height", dirty=True, tip="0.5 = flat")
+            self._material_channels(lay, dirty=True)
             self._end_section()
+            if lay.maps:
+                imgui.text_wrapped("Bitmap maps override matching constants. Clear a bitmap slot to edit its constant.")
         labels = ["Color / rough noise", "Height noise", "Noise scale", "Random seed"]
         if self._section("Variation", labels):
             self.p_slider("Color / rough noise", lay, "variation", dirty=True)
@@ -2718,18 +3041,20 @@ class App:
             if self._row("Random seed"):
                 if imgui.button("New seed", V2(-1, 0)):
                     import random
-                    lay.seed, self.engine.dirty = random.random(), True
+                    self._edit_properties("Randomize material", [(lay, {"seed": random.random()})])
             self._end_section()
+
+        self.material_ui.draw(lay)
 
     def _props_layer(self, lay):
         eng = self.engine
         labels = ["Name", "Blend", "Opacity", "Height blend", "Channels", "Painting"]
         if not self._section("Layer", labels):
+            self.material_ui.channel_blending(lay)
             return
         if self._row("Name", "Double-click the layer to rename it in place"):
             ch, name = imgui.input_text("##name", lay.name)
-            if ch:
-                lay.name = name
+            self._edit_value("Rename layer", lay, "name", name, ch, continuous=True)
         self.p_combo("Blend", lay, "blend", BLEND_MODES, multi=True)
         self.p_slider("Opacity", lay, "opacity", dirty=True, multi=True)
         self.p_combo("Height blend", lay, "hblend", HEIGHT_BLEND, multi=True,
@@ -2739,6 +3064,7 @@ class App:
             if imgui.button("Clear painting", V2(-1, 0)):
                 eng.clear_paint()
         self._end_section()
+        self.material_ui.channel_blending(lay)
 
     def _props_mask(self, lay):
         eng = self.engine
@@ -2782,8 +3108,20 @@ class App:
     def display_panel(self):
         eng, r = self.engine, self.engine.renderer
         self._flt = ""
+        if self._section("Color workflow", ["Working space", "Display transform", "Tangent basis"]):
+            if self._row("Working space"):
+                imgui.text_wrapped("Linear Rec.709 (managed)" if eng.color.managed else "Legacy encoded RGB")
+            if self._row("Display transform"):
+                imgui.text_wrapped("sRGB / Un-tone-mapped" if eng.color.managed else "Legacy ACES-style curve")
+            if self._row("Tangent basis"):
+                basis = eng.mesh.extra.get("tangent_basis", {})
+                imgui.text_wrapped(basis.get("name", "Legacy") + (" / Blender " + basis["version"] if basis.get("backend") == "Blender" else ""))
+            self._end_section()
         if self._section("View", ["Display", "Layout"]):
-            self.p_combo("Display", r, "mode", DISPLAY_MODES, tip="C cycles through the channels")
+            before_mode = r.mode
+            self.p_combo("Display", r, "mode", DISPLAY_MODES, dirty=False, tip="C cycles through the channels")
+            if r.mode != before_mode:
+                eng.dirty = True
             if self._row("Layout", "F1 split, F2 3D, F3 2D"):
                 mode = [VIEW_3D, VIEW_SPLIT, VIEW_2D].index(self.view_mode)
                 v = self._seg("lay", ["3D", "3D + 2D", "2D"], mode, ["F2", "F1", "F3"],
@@ -2791,8 +3129,22 @@ class App:
                 self.view_mode = [VIEW_3D, VIEW_SPLIT, VIEW_2D][v]
             self._end_section()
         if self._section("Lighting", ["Exposure", "Light rotation", "Baked AO"]):
+            if self._row("Environment"):
+                if imgui.button("Load environment..."):
+                    path = self._load_image("Environment image")
+                    if path:
+                        try:
+                            eng.set_environment(path)
+                        except Exception as error:
+                            self.msg(f"Environment failed: {error}")
+                if r.env_path:
+                    imgui.text_wrapped(os.path.basename(r.env_path))
+                    if imgui.button("Use studio environment"):
+                        eng.set_environment(None)
             self.p_slider("Exposure", r, "exposure", 0.1, 4.0)
             self.p_slider("Light rotation", r, "env_rot", -3.1416, 3.1416, tip="Shift + Right drag in the viewport")
+            self.p_slider("Emissive intensity", r, "emissive_intensity", 0., 20.)
+            self.p_check("Alpha test", r, "alpha_test", dirty=False)
             if self._row("Baked AO", "Darken with the baked ambient occlusion"):
                 ch, v = imgui.checkbox("##ao", r.use_ao)
                 if ch:
@@ -2811,10 +3163,15 @@ class App:
         def label(e):
             if e[0] == "stack":
                 return f"{ICON.layers}  Layer stack change"
+            if e[0] in ("properties", "resources", "bakes"):
+                return f"{ICON.layers}  {e[3]}"
+            if e[0] == "mask":
+                return f"{ICON.paint}  Mask change on {e[1].name}"
             kind = "Mask paint" if "mask" in e[2] else "Paint"
             return f"{ICON.paint}  {kind} on {e[1].name}"
 
-        imgui.text_disabled(f"Click a step to go back to it. Keeps {len(undo)} of max 24 steps.")
+        imgui.text_disabled(f"Click a step to go back to it. Keeps {len(undo)} of max {eng.history_limit} steps.")
+        imgui.text_disabled(f"History {eng.history_usage() / 1024**2:.1f} MiB / {eng.history_budget_bytes / 1024**2:.0f} MiB")
         target = None
         if imgui.selectable("Oldest kept state", len(undo) == 0)[0]:
             target = 0
@@ -2929,6 +3286,8 @@ class App:
 
     def settings_panel(self):
         self._flt = ""
+        self.project_ui.settings()
+        self.memory_ui.draw()
         if self._section("Interface", ["UI scale"]):
             if self._row("UI scale", "Size of all text and controls. Defaults to your Windows display scaling."):
                 pct = getattr(self, "_scale_edit", int(round(self.ui_scale * 100)))
@@ -2970,10 +3329,10 @@ class App:
         b = self.engine.brush
         return b.proj_xform if (b.tool == TOOL_PROJECTION and not self.poly_fill) else b.stencil_xform
 
-    def _image_overlay(self, path, kind, xform, alpha):
+    def _image_overlay(self, path, kind, xform, alpha, rect=None):
         """Draw a stencil / projection image where the brush will sample it."""
         e = self.engine
-        vx, vy, vw, vh = self.vp_rect
+        vx, vy, vw, vh = self.vp_rect if rect is None else rect
         if vw < 2 or not path:
             return
         try:
@@ -3001,8 +3360,10 @@ class App:
         eng, r, b = self.engine, self.engine.renderer, self.engine.brush
         if b.tool == TOOL_PROJECTION and not self.poly_fill and b.proj_maps:
             self._image_overlay(next(iter(b.proj_maps.values())), "color", b.proj_xform, 0.55)
+            self._image_overlay(next(iter(b.proj_maps.values())), "color", b.proj_xform, 0.55, self.uv_rect)
         if b.stencil and b.stencil_enabled:
             self._image_overlay(b.stencil, "gray", b.stencil_xform, 0.35)
+            self._image_overlay(b.stencil, "gray", b.stencil_xform, 0.35, self.uv_rect)
         self._draw_gizmo()
         if w < 200 * s or h < 80 * s:
             return
@@ -3034,6 +3395,8 @@ class App:
             imgui.same_line()
             self._cmd_btn(ICON.hide, "view.hide_ui", label="Show panels")
         chips = []
+        if self.material_ui.transform_tool and eng.layer is not None:
+            chips.append(f"{self.material_ui.transform_tool.title()} fill projection: left-drag, Esc cancels")
         if self.quick_edit:
             chips.append("Editing quick mask (U applies)")
         elif eng.quick_mask_enabled and eng.ts is not None and eng.ts.quick is not None:
@@ -3050,18 +3413,37 @@ class App:
             chips.append("Next stroke resumes the last one (A)")
         if chips:
             imgui.text_colored(V4(*ACCENT, 1), "   ".join(chips))
-        why = self._paint_block_reason()
+        why = self._paint_block_reason(uv=self.view_mode == VIEW_2D or self._over(self.uv_rect), polygon=self.poly_fill)
         if why:
             imgui.push_text_wrap_pos(imgui.get_cursor_pos_x() + 360 * s)
             imgui.text_colored(V4(*WARN_COL, 1), why)
             imgui.pop_text_wrap_pos()
+        if any(ts.tiles is not None for ts in self.engine.sets):
+            imgui.text_disabled("3D tile preview: up to 512 px; authored/export resolution is unchanged.")
         imgui.end()
         ux, uy, uw, uh = self.uv_rect
         if uw > 1:
             fg = imgui.get_foreground_draw_list()
-            label = f"2D  |  {DISPLAY_MODES[r.mode]}  (view only)"
-            tw = imgui.calc_text_size(label).x
-            fg.add_text(V2(ux + uw - tw - 10 * s, uy + 10 * s), col32(*TEXT_DIM), label)
+            fg.push_clip_rect(V2(ux, uy), V2(ux + uw, uy + uh))
+            tiled = eng.ts is not None and eng.ts.tiles is not None
+            label = f"2D  |  {DISPLAY_MODES[r.mode]}" + ("  |  tile preview up to 512 px" if tiled else "")
+            fg.add_text(V2(ux + 10 * s, uy + uh - 42 * s), col32(*TEXT_DIM), label)
+            fg.add_text(V2(ux + 10 * s, uy + uh - 23 * s), col32(*TEXT_DIM),
+                        "Left: paint across tiles   Middle: pan   Wheel: zoom" if tiled else "Left: paint   Middle: pan   Wheel: zoom")
+            if tiled:
+                _, mapping = self._uv_input()
+                sx, sy = self.fb_scale
+                for address in eng.ts.tile_addresses:
+                    pixel = mapping.pixel(address.to_list())
+                    fg.add_text(V2(ux + pixel[0] / sx + 5 * s, uy + uh - pixel[1] / sy - 22 * s),
+                                col32(*TEXT_DIM), str(address.udim))
+            if self._over(self.uv_rect) or self.view_mode == VIEW_2D:
+                reason = ("Polygon fill: use 3D." if self.poly_fill else (
+                    "Symmetry: use 3D or turn it off." if b.symmetry else (
+                    eng.uv_tool_reason())))
+                if reason:
+                    fg.add_text(V2(ux + 10 * s, uy + uh - 63 * s), col32(*WARN_COL), reason)
+            fg.pop_clip_rect()
         hint = {"size": f"Size {self.bsize.text()}   Hardness {b.hardness:.2f}",
                 "flow": f"Flow {b.flow:.2f}   Angle {b.angle:.0f}",
                 "st_rot": f"Rotate {self._xform()[3]:.0f} deg" + ("  (snapped)" if imgui.get_io().key_shift else ""),
@@ -3075,10 +3457,18 @@ class App:
             fg.add_rect_filled(V2(mx + 14, my - sz.y - 12), V2(mx + 22 + sz.x, my - 4), col32(0, 0, 0, 0.7), 3)
             fg.add_text(V2(mx + 18, my - sz.y - 8), col32(1, 1, 1), hint)
 
-    def _paint_block_reason(self):
+    def _paint_block_reason(self, uv=False, polygon=False):
         eng, b = self.engine, self.engine.brush
+        if not uv and eng.shader_workflow["displacement_meters"]:
+            return "Displaced surface preview: edit in 2D, or set displacement range to zero for 3D painting."
+        if b.target == 0 and b.user_channel and b.tool != TOOL_PAINT:
+            return "User channels support Paint and Erase. Select the Paint tool."
+        if not polygon and eng.ts is not None and eng.ts.tiles is not None and (b.tool in (TOOL_CLONE, TOOL_SMUDGE) or b.target == 2 or eng.quick_mask_enabled):
+            return "Tiled clone, smudge and quick-mask strokes are not integrated yet."
+        if eng.ts is not None and eng.ts.tiles is not None and polygon and (b.target == 2 or eng.quick_mask_enabled):
+            return "Tiled quick-mask polygon fill is not integrated yet."
         lay = eng.layer
-        if self.view_mode == VIEW_2D or b.target == 2:
+        if b.target == 2:
             return ""
         if lay is None:
             return "No layer selected: add a paint layer to start painting."
@@ -3088,7 +3478,7 @@ class App:
             return "The selected layer is hidden: show it (eye icon) to paint."
         if b.target == 0 and lay.kind != "paint":
             return "Fill layer selected: paint its mask (mask thumbnail) or add a paint layer."
-        if not self.poly_fill and b.tool == TOOL_CLONE and eng.clone_source is None:
+        if not self.poly_fill and b.tool == TOOL_CLONE and eng.clone_source is None and not (self._over(self.uv_rect) or self.view_mode == VIEW_2D):
             return "Clone: hold V and click on the model to set the source first."
         if not self.poly_fill and b.tool == TOOL_PROJECTION and not b.proj_maps:
             return "Projection: load an image in Properties > Projection first."
@@ -3150,7 +3540,7 @@ class App:
                 setattr(obj, at, v)
         if b.target == 0:
             imgui.set_next_item_width(200 * s)
-            ch, c = imgui.color_edit3("Color", list(b.color))
+            ch, c = imgui.color_edit3("Color", list(b.color), imgui.ColorEditFlags_.no_inputs)
             if ch:
                 b.color = list(c)
         else:
@@ -3162,10 +3552,64 @@ class App:
     # ------------------------------------------------------------------ viewport input
     def _mouse_vp(self):
         """Mouse position in 3D-view framebuffer pixels, origin bottom-left."""
+        return tuple(ViewInput(self.vp_rect, self.fb_scale).pixel(imgui.get_io().mouse_pos))
+
+    def _uv_input(self):
+        view = ViewInput(self.uv_rect, self.fb_scale)
+        return view, self.uv.mapping(*view.size)
+
+    def _mouse_uv(self):
+        view, mapping = self._uv_input()
+        return mapping.uv(view.pixel(imgui.get_io().mouse_pos))
+
+    def _begin_uv_paint(self):
+        e = self.engine
+        why = self._paint_block_reason(uv=True) or e.uv_tool_reason()
+        if self.poly_fill:
+            why = "Polygon fill uses the 3D view; choose Paint for UV strokes."
+        if why or not e.can_paint():
+            self.msg(why or "This layer can't be painted.")
+            return
+        if e.brush.tool == TOOL_CLONE and self.clone_absolute:
+            e.clone_uv_offset = None
+        _, mapping = self._uv_input()
+        try:
+            if e.begin_uv_stroke(self._mouse_uv(), mapping, pressure=self.tablet.pressure):
+                self.drag = "uvpaint"
+        except (ValueError, OSError) as error:
+            e.cancel_stroke()
+            self.drag = None
+            self.msg("UV stroke failed: " + str(error))
+
+    def _paint_uv_at_cursor(self):
+        # Capture stays in the originating view; leaving it makes a gap.
+        uv = self._mouse_uv() if self._over(self.uv_rect) else (-1., -1.)
+        _, mapping = self._uv_input()
+        try:
+            self.engine.stroke_uv_to(uv, pressure=self.tablet.pressure, mapping=mapping)
+        except (ValueError, OSError) as error:
+            self.engine.cancel_stroke()
+            self.drag = None
+            self.msg("UV stroke failed: " + str(error))
+
+    def _draw_uv_cursor(self):
+        if not self._over(self.uv_rect) or self.material_ui.transform_tool or self.poly_fill:
+            return
+        e = self.engine
+        info = e.pick_uv(self._mouse_uv())
+        if info is None:
+            return
+        _, mapping = self._uv_input()
+        radius = e.uv_brush_radius(info["tri"], mapping) / mapping.units_per_pixel
         mx, my = imgui.get_io().mouse_pos
-        vx, vy, vw, vh = self.vp_rect
         sx, sy = self.fb_scale
-        return (mx - vx) * sx, (vy + vh - my) * sy
+        points = [V2(mx + math.cos(t) * radius / sx, my + math.sin(t) * radius / sy)
+                  for t in np.linspace(0, 2 * math.pi, 65)]
+        x, y, w, h = self.uv_rect
+        draw = imgui.get_background_draw_list()
+        draw.push_clip_rect(V2(x, y), V2(x + w, y + h))
+        draw.add_polyline(points, col32(1, 1, 1, .9), 1., int(imgui.ImDrawFlags_.closed))
+        draw.pop_clip_rect()
 
     # ------------------------------------------------------------------ axis gizmo
     _AXES = (("x", 0, (0.86, 0.36, 0.36)), ("y", 1, (0.52, 0.78, 0.38)), ("z", 2, (0.38, 0.58, 0.90)))
@@ -3277,12 +3721,19 @@ class App:
         return self.engine.pick(*self._mouse_vp())
 
     def _cursor_visible(self):
-        return self.cursor is not None and not imgui.get_io().key_alt and self._gizmo_hover_axis is None
+        return (self.cursor is not None and not imgui.get_io().key_alt and self._gizmo_hover_axis is None
+                and not self.material_ui.transform_tool)
 
     def _paint_at_cursor(self):
         hit = self.engine.pick(*self._mouse_vp())
         if hit is not None:
-            self.engine.stroke_to(hit[0])
+            try:
+                self.engine.stroke_to(hit[0], pressure=self.tablet.pressure)
+            except (ValueError, OSError) as error:
+                self.engine.cancel_stroke()
+                self.drag = None
+                self.msg("3D stroke failed: " + str(error))
+                return
             self._last_hit = hit[0]
 
     def _begin_paint(self):
@@ -3301,7 +3752,12 @@ class App:
             if self._line_from_last(end=False):
                 self.drag = "paint"
                 return
-        if eng.begin_stroke(hit[0]):
+        try:
+            started = eng.begin_stroke(hit[0], pressure=self.tablet.pressure)
+        except (ValueError, OSError) as error:
+            self.msg("3D stroke failed: " + str(error))
+            return
+        if started:
             self.drag = "paint"
             self._last_hit = hit[0]
 
@@ -3319,14 +3775,14 @@ class App:
             dx, dy = length * math.cos(ang), length * math.sin(ang)
         if b.tool == TOOL_CLONE and self.clone_absolute:
             eng.clone_offset = None
-        if not eng.begin_stroke(self._last_hit):
+        if not eng.begin_stroke(self._last_hit, pressure=self.tablet.pressure):
             return False
         n = max(2, int(math.hypot(dx, dy) / 2))
         for k in range(1, n + 1):
             t = k / n
             hit = eng.pick(p0[0] + dx * t, p0[1] + dy * t)
             if hit is not None:
-                eng.stroke_to(hit[0])
+                eng.stroke_to(hit[0], pressure=self.tablet.pressure)
                 self._last_hit = hit[0]
         if end:
             eng.end_stroke()
@@ -3344,14 +3800,19 @@ class App:
 
     def _poly_fill_click(self):
         eng, b = self.engine, self.engine.brush
-        why = self._paint_block_reason()
+        why = self._paint_block_reason(polygon=True)
         if why:
             self.msg(why)
             return
         tris = eng.select_triangles(*self._mouse_vp(), self.fill_mode)
         if len(tris) == 0:
             return
-        if eng.polygon_fill(tris, erase=b.mode == 1):
+        try:
+            filled = eng.polygon_fill(tris, erase=b.mode == 1)
+        except (ValueError, OSError) as error:
+            self.msg("Polygon fill failed: " + str(error))
+            return
+        if filled:
             self.msg(f"{'Erased' if b.mode else 'Filled'} {FILL_MODES[self.fill_mode].lower()}  ({len(tris)} triangles)")
 
     def _pick_texture_set(self):
@@ -3364,10 +3825,93 @@ class App:
         self.sel_uids, self._last_primary = set(), None
         self.msg(f"Texture set: {eng.ts.name}")
 
+    def _finish_fill_projection(self, cancel=False):
+        gesture = getattr(self, "_fill_projection_drag", None)
+        if gesture is not None:
+            if self.engine._edit_transaction is gesture["transaction"]:
+                (self.engine.cancel_edit if cancel else self.engine.commit_edit)()
+            self._fill_projection_drag = None
+            if self.drag == "fill_projection":
+                self.drag = None
+
+    def _fill_projection_input(self, over3, over2):
+        """Edit the same projection properties as numeric controls in one gesture."""
+        io = imgui.get_io()
+        ui, eng = self.material_ui, self.engine
+        gesture = self._fill_projection_drag
+        lay = eng.layer
+        valid = (lay is not None and lay.kind == "fill" and eng.brush.target == 0
+                 and (bool(lay.maps) or lay.authored is not None) and lay.pid == ui.transform_layer_pid and ui.transform_tool is not None)
+        if gesture is not None:
+            if not valid or self.engine._edit_transaction is not gesture["transaction"]:
+                self._finish_fill_projection(cancel=True)
+                return True
+            if imgui.is_key_pressed(imgui.Key.escape):
+                self._finish_fill_projection(cancel=True)
+                return True
+            mx, my = io.mouse_pos
+            dx, dy = mx - gesture["mouse"][0], my - gesture["mouse"][1]
+            original = gesture["original"]
+            if gesture["tool"] == "translate":
+                w, h = gesture["size"]
+                values = {"offset": [original["offset"][0] - dx / w,
+                                     original["offset"][1] + dy / h]}
+            elif gesture["tool"] == "warp":
+                corners=[list(point) for point in original["warp"]]
+                index=gesture["corner"];w,h=gesture["size"]
+                corners[index]=[corners[index][0]+dx/w,corners[index][1]-dy/h]
+                values={"warp":corners}
+            elif gesture["tool"] == "rotate":
+                angle = original["rotation"] + dx * .5
+                values = {"rotation": round(angle / 15) * 15 if io.key_shift else angle}
+            else:
+                factor = math.exp(float(np.clip(dx * .006, -8, 8)))
+                values = {"scale": [float(np.sign(value) * np.clip(abs(value) * factor, .001, 1000))
+                                    for value in original["scale"]]}
+            try:
+                eng.set_projection(lay, **values)
+            except Exception as error:
+                self._finish_fill_projection(cancel=True)
+                self.msg(f"Projection edit failed: {error}")
+                return True
+            if not imgui.is_mouse_down(0):
+                self._finish_fill_projection()
+            return True
+        if not valid or io.key_alt or io.key_ctrl or self.drag:
+            return False
+        if imgui.is_key_pressed(imgui.Key.escape):
+            ui.transform_tool = None
+            return True
+        if not (over3 or over2):
+            return False
+        imgui.set_mouse_cursor(imgui.MouseCursor_.resize_all)
+        if imgui.is_mouse_clicked(0):
+            self._finish_property_edit()
+            rect = self.vp_rect if over3 else self.uv_rect
+            transaction = eng.begin_edit(lay.proj, label=ui.transform_tool.title() + " fill projection")
+            self._fill_projection_drag = {
+                "transaction": transaction, "tool": ui.transform_tool,
+                "mouse": tuple(io.mouse_pos), "size": (max(rect[2], 1), max(rect[3], 1)),
+                "corner":ui.warp_corner,
+                "original": {"warp":lay.proj.warp or [[0.,0.],[1.,0.],[1.,1.],[0.,1.]],"offset": list(lay.proj.offset), "scale": list(lay.proj.scale),
+                             "rotation": lay.proj.rotation}}
+            self.drag = "fill_projection"
+            return True
+        return False
+
     def viewport_input(self):
         io = imgui.get_io()
         eng, b = self.engine, self.engine.brush
+        if getattr(eng, "_tile_stroke", None) is not None and imgui.is_key_pressed(imgui.Key.escape):
+            eng.cancel_stroke()
+            self.drag = None
+            return
         over3, over2 = self._over(self.vp_rect), self._over(self.uv_rect)
+        if self.authored_ui.input(over3,over2):return
+        if self._fill_projection_input(over3, over2):
+            return
+        if self.effects_ui.pick():
+            return
         alt, ctrl, shift = io.key_alt, io.key_ctrl, io.key_shift
         typing = io.want_text_input
         s_held = imgui.is_key_down(imgui.Key.s) and not typing
@@ -3435,15 +3979,26 @@ class App:
                     else:
                         eng.camera.zoom(io.mouse_wheel)
             elif over2:
-                if imgui.is_mouse_clicked(0) and not alt:
-                    self.msg("The 2D view is for viewing: paint in the 3D view (F2 for 3D only).")
+                if s_held and has_image and any(imgui.is_mouse_clicked(k) for k in (0, 1, 2)):
+                    kind = "st_rot" if imgui.is_mouse_clicked(0) else ("st_zoom" if imgui.is_mouse_clicked(1) else "st_move")
+                    self._image_view = "uv"
+                    self.drag, self.drag_start = kind, (mx, my, list(self._xform()))
+                elif imgui.is_mouse_clicked(0) and not alt:
+                    if v_held:
+                        self.msg("UV clone source set." if eng.set_uv_clone_source(self._mouse_uv()) else "Choose a UV island for the clone source.")
+                    elif ctrl:
+                        self.drag, self.drag_start = "flow", (mx, my, b.flow, b.angle)
+                    elif shift:
+                        self.msg("Straight-line/resume shortcuts currently use the 3D view; drag to paint in 2D.")
+                    else:
+                        self._begin_uv_paint()
                 elif any(imgui.is_mouse_clicked(k) for k in (0, 1, 2)):
                     self.drag = "uvpan"
                 if io.mouse_wheel:
                     self.uv.zoom_by(io.mouse_wheel)
         if self.drag:
             d = self.drag
-            if d in ("paint", "flow", "snaporbit", "pan_l", "st_rot", "split"):
+            if d in ("paint", "uvpaint", "flow", "snaporbit", "pan_l", "st_rot", "split"):
                 held = imgui.is_mouse_down(0)
             elif d == "orbit":
                 held = imgui.is_mouse_down(0) or imgui.is_mouse_down(1)
@@ -3480,6 +4035,8 @@ class App:
                 b.flow = float(np.clip(f0 + (mx - x0) * 0.004, 0, 1))
                 b.angle = float((a0 + (my - y0) * 0.5) % 360)
             elif d in ("st_rot", "st_move", "st_zoom"):
+                if getattr(self, "_image_view", None) == "uv":
+                    vw, vh = self.uv_rect[2:]
                 x0, y0, xf0 = self.drag_start
                 xf = self._xform()
                 if d == "st_rot":
@@ -3497,8 +4054,12 @@ class App:
             elif d == "uvpan":
                 self.uv.pan(dx, dy, self.uv_rect[2], self.uv_rect[3])
             if not held:
-                if d == "paint":
+                if d in ("paint", "uvpaint"):
+                    if d == "uvpaint":
+                        self._paint_uv_at_cursor()
                     eng.end_stroke()
+                if d in ("st_rot", "st_move", "st_zoom"):
+                    self._image_view = None
                 if d == "rmb":
                     self.quick_open = True
                 if d == "split":
@@ -3518,6 +4079,11 @@ class App:
 
     # ------------------------------------------------------------------ dialogs
     def extra_dialogs(self):
+        self.authored_ui.draw()
+        self.channels_ui.draw()
+        self.delivery_ui.draw()
+        self.import_ui.draw()
+        self.project_ui.dialogs()
         s = self.ui_scale
         e = self.engine
         center = imgui.get_main_viewport().get_center()
@@ -3556,16 +4122,14 @@ class App:
             _, bs.curv_from_normal = imgui.checkbox("Add normal-map detail to curvature", bool(bs.curv_from_normal))
             imgui.set_next_item_width(iw)
             _, bs.dilation = imgui.slider_int("Dilation (px)", int(bs.dilation), 0, 64)
+            self.bake_ui.source_controls(bs)
             if len(e.sets) > 1:
                 _, self.bake_all = imgui.checkbox("Bake every texture set", self.bake_all)
             if imgui.button("Bake", V2(120 * s, 0)):
-                targets = list(range(len(e.sets))) if (self.bake_all and len(e.sets) > 1) else [e.active]
-                settings = bs.to_dict()
-
+                settings = BakeSettings.from_dict(copy.deepcopy(bs.to_dict()))
+                all_sets = bool(self.bake_all and len(e.sets) > 1)
                 def job():
-                    for i in targets:
-                        e.rebake(BakeSettings.from_dict(settings), ts_index=i)
-                    self.msg(f"Baked mesh maps for {len(targets)} texture set{'s' if len(targets) > 1 else ''}")
+                    self.bake_ui.run(settings, all_sets)
                 self._run_busy("Baking mesh maps...", job)
                 imgui.close_current_popup()
             imgui.same_line()
@@ -3613,19 +4177,112 @@ class App:
             _tip("Keep working.")
             imgui.end_popup()
 
-    def _export_files(self):
-        mesh_name = self.engine.mesh.name if self.engine.mesh is not None else ""
-        base = re.sub(r"[^A-Za-z0-9_-]+", "_", self.export_name or mesh_name).strip("_") or "Mesh"
-        if self.export_preset == 0:
-            return [(f"T_{base}_BC.png", "Base color, sRGB"), (f"T_{base}_N.png", "Normal, DirectX (green down)"),
-                    (f"T_{base}_ORM.png", "R: AO   G: Roughness   B: Metallic"), (f"T_{base}_H.png", "Height, 16-bit")]
-        if self.export_preset == 1:
-            return [(f"{base}_Albedo.png", "Base color, sRGB"), (f"{base}_Normal.png", "Normal, OpenGL"),
-                    (f"{base}_MetallicSmoothness.png", "RGB: Metallic   A: Smoothness"),
-                    (f"{base}_AO.png", "Ambient occlusion"), (f"{base}_Height.png", "Height, 16-bit")]
-        return [(f"{base}_BaseColor.png", "Base color, sRGB"), (f"{base}_Roughness.png", "Roughness"),
-                (f"{base}_Metallic.png", "Metallic"), (f"{base}_Normal.png", "Normal, OpenGL"),
-                (f"{base}_Height.png", "Height, 16-bit"), (f"{base}_AO.png", "Ambient occlusion")]
+    def _export_template(self):
+        return self.export_custom_template or texture_exporter.OUTPUT_TEMPLATES[self.export_templates[self.export_preset]]
+
+    def _export_manifest(self, template=None, overrides=None):
+        if self.export_set_identity != id(self.engine.mesh):
+            self.export_sets = {i: True for i in range(len(self.engine.sets))}
+            self.export_set_identity = id(self.engine.mesh)
+        if template is None:
+            template = self.export_custom_template or self.export_templates[self.export_preset]
+        return texture_exporter.build_export_manifest(
+            self.engine, self.export_dir, template=template, file_format=self.export_format or None,
+            depth=self.export_depth or None, size=self.export_size, padding=self.export_padding,
+            dilation=self.export_dilation, texture_sets=[i for i, on in self.export_sets.items() if on],
+            project=self.export_name or None, overrides=self.export_overrides if overrides is None else overrides)
+
+    def _export_files(self, manifest=None):
+        manifest = manifest or self._export_manifest()
+        return [(os.path.basename(e.path), f"{e.set_name} | {e.format.upper()} {e.depth} | {e.resolution} x {e.resolution}")
+                for e in manifest.entries]
+
+    def _export_options(self):
+        """Export UI only; evaluation and naming live in the shared manifest."""
+        s = self.ui_scale
+        changed, choice = imgui.combo("Output template", self.export_preset, self.export_templates)
+        if changed:
+            self.export_preset, self.export_custom_template = choice, None
+            self.export_template_json, self.export_overrides = "", {}
+        if self.export_custom_template is not None:
+            imgui.text_disabled("Custom: " + self.export_custom_template.get("name", "Unnamed"))
+        _, self.export_name = imgui.input_text("Project name token", self.export_name)
+        _tip("Replaces $project in templates that use it. Texture set names keep multiset outputs distinct.")
+        _, self.export_dir = imgui.input_text("Folder", self.export_dir)
+        imgui.same_line()
+        if imgui.button("Browse") and pfd is not None:
+            p = pfd.select_folder("Export folder", self.export_dir).result()
+            if p:
+                self.export_dir = p
+        formats = [""] + list(texture_exporter.FORMATS)
+        _, v = imgui.combo("File format", formats.index(self.export_format), ["Based on template"] + formats[1:])
+        self.export_format = formats[v]
+        depths = [""] + sorted({d for values in texture_exporter.FORMATS.values() for d in values})
+        _, v = imgui.combo("Bit depth", depths.index(self.export_depth), ["Based on template"] + depths[1:])
+        self.export_depth = depths[v]
+        sizes = texture_exporter.SIZES
+        _, v = imgui.combo("Output size", sizes.index(self.export_size), ["Texture set size"] + [str(n) for n in sizes[1:]])
+        self.export_size = sizes[v]
+        _, v = imgui.combo("Padding", texture_exporter.PADDING.index(self.export_padding), texture_exporter.PADDING)
+        self.export_padding = texture_exporter.PADDING[v]
+        if self.export_padding not in ("none", "infinite"):
+            _, self.export_dilation = imgui.slider_int("Dilation (px)", self.export_dilation, 0, 128)
+        # Reset per-project selections even when the user has deselected all sets.
+        if self.export_set_identity != id(self.engine.mesh):
+            self.export_sets = {i: True for i in range(len(self.engine.sets))}
+            self.export_set_identity = id(self.engine.mesh)
+        if imgui.collapsing_header("Texture sets"):
+            for i, ts in enumerate(self.engine.sets):
+                _, self.export_sets[i] = imgui.checkbox(f"{ts.name} ({ts.res})##export-set{i}", self.export_sets.get(i, True))
+        if imgui.collapsing_header("Output maps"):
+            for i, m in enumerate(self._export_template().get("maps", [])):
+                name = m.get("name", f"Unnamed {i}")
+                ov = self.export_overrides.setdefault(name, {})
+                _, enabled = imgui.checkbox(f"{name}##export-map{i}", ov.get("enabled", m.get("enabled", True)))
+                ov["enabled"] = enabled
+                fmts = [""] + list(texture_exporter.FORMATS)
+                current = ov.get("format", "")
+                _, fv = imgui.combo(f"Format##export-map-fmt{i}", fmts.index(current), ["Template / global"] + fmts[1:])
+                ov["format"] = fmts[fv]
+                current = ov.get("depth", "")
+                _, dv = imgui.combo(f"Depth##export-map-depth{i}", depths.index(current), ["Template / global"] + depths[1:])
+                ov["depth"] = depths[dv]
+        if imgui.collapsing_header("Template editor"):
+            if not self.export_template_json:
+                self.export_template_json = json.dumps(self._export_template(), indent=2)
+            imgui.text_disabled("Edit map names, channel packing and defaults. Apply to update the preview.")
+            _, self.export_template_json = imgui.input_text_multiline(
+                "##export-template-json", self.export_template_json, V2(600 * s, 180 * s))
+            if imgui.button("Apply template"):
+                try:
+                    candidate = json.loads(self.export_template_json)
+                    # A manifest validates the editable template before accepting it.
+                    self._export_manifest(template=candidate, overrides={})
+                    self.export_custom_template, self.export_overrides = candidate, {}
+                except Exception as ex:
+                    self.msg(f"Template not applied: {ex}")
+            imgui.same_line()
+            if imgui.button("Load JSON...") and pfd is not None:
+                paths = pfd.open_file("Load export template", "", ["JSON template", "*.json"]).result()
+                if paths:
+                    try:
+                        candidate = texture_exporter.load_template(paths[0])
+                        self._export_manifest(template=candidate, overrides={})
+                        self.export_custom_template, self.export_overrides = candidate, {}
+                        self.export_template_json = json.dumps(candidate, indent=2)
+                    except Exception as ex:
+                        self.msg(f"Template not loaded: {ex}")
+            imgui.same_line()
+            if imgui.button("Save JSON...") and pfd is not None:
+                path = pfd.save_file("Save export template", "template.json", ["JSON template", "*.json"]).result()
+                if path:
+                    try:
+                        template = copy.deepcopy(self._export_template())
+                        for m in template["maps"]:
+                            m.update({k: v for k, v in self.export_overrides.get(m["name"], {}).items() if v != ""})
+                        texture_exporter.save_template(template, path)
+                    except Exception as ex:
+                        self.msg(f"Template not saved: {ex}")
 
     def dialogs(self):
         s = self.ui_scale
@@ -3666,6 +4323,28 @@ class App:
                 imgui.text_disabled("OBJ works out of the box. FBX/glTF need: pip install assimp-py")
             imgui.set_next_item_width(260 * s)
             _, self.new_res_idx = imgui.combo("Document resolution", self.new_res_idx, [str(r) for r in RESOLUTIONS])
+            _, self.new_color_mode = imgui.combo("Color workflow", self.new_color_mode, ["Legacy", "Managed linear (OpenColorIO)"])
+            _, self.new_tangent_basis = imgui.combo("Tangent basis", self.new_tangent_basis, ["Legacy", "MikkTSpace (external Blender)"])
+            _, self.new_unit = imgui.combo("Source units", self.new_unit, ["Unspecified", "Meters", "Centimeters", "Millimeters", "Inches", "Feet"])
+            _, self.new_auto_uv = imgui.checkbox("Prepare missing UVs (Blender)", self.new_auto_uv)
+            if self.new_auto_uv:
+                _, self.new_uv_regenerate = imgui.checkbox("Regenerate valid UVs too", self.new_uv_regenerate)
+                _, self.new_uv_method = imgui.combo("Unwrap method", self.new_uv_method, ["Smart project / angle seams", "Angle based / dihedral seams"])
+                _, self.new_uv_padding = imgui.slider_int("UV padding (pixels)", self.new_uv_padding, 0, 32)
+                _, self.new_uv_angle = imgui.slider_float("UV seam angle", self.new_uv_angle, 1., 89., "%.1f deg")
+                _, self.new_uv_rotate = imgui.checkbox("Allow UV island rotation", self.new_uv_rotate)
+                _, self.new_uv_tiles = imgui.slider_int("UV tile budget per material", self.new_uv_tiles, 1, 64)
+                imgui.text_wrapped("Angle-seam charts are distributed across up to this many UDIM tiles. Valid UVs stay fixed; generated multi-tile materials enable tiled painting automatically.")
+            if from_file and self.new_path and imgui.button("Inspect UV availability"):
+                def inspect_uvs():
+                    from .uvprep import uv_status
+                    candidate = load_mesh(self.new_path, require_uvs=False)
+                    valid = uv_status(candidate)
+                    self.new_uv_info = f"{int(valid.sum())} valid / {int((~valid).sum())} missing or degenerate UV triangles; {len(candidate.material_names)} materials"
+                self._run_busy("Inspecting UV availability...", inspect_uvs)
+            if self.new_uv_info:
+                imgui.text_wrapped(self.new_uv_info)
+            imgui.text_wrapped("Existing projects retain their saved workflow. Managed pickers use sRGB colors; scalar maps and normals are data.")
             imgui.text_disabled("Mesh maps (AO, curvature, position, normal) are baked automatically.\n"
                                 "Starts a fresh layer stack: unsaved changes are lost.")
             ok = not from_file or bool(self.new_path)
@@ -3677,7 +4356,7 @@ class App:
                     path = self.new_path
 
                     def job():
-                        self._new_project(load_mesh(path), res)
+                        self._new_project(load_mesh(path, require_uvs=not self.new_auto_uv), res)
                     self._run_busy(f"Loading {os.path.basename(path)}...", job)
                 else:
                     name = names[self.new_mesh_idx]
@@ -3721,6 +4400,7 @@ class App:
                                 "generators are approximated with Strata's own; a report lists what changed. "
                                 "Starts a new Strata project: unsaved changes are lost.")
             imgui.pop_text_wrap_pos()
+            self.import_ui.budgets()
             if imgui.button("Import", V2(120 * s, 0)):
                 self._import_spp(info, self.spp_set)
                 imgui.close_current_popup()
@@ -3756,39 +4436,41 @@ class App:
 
         imgui.set_next_window_pos(center, imgui.Cond_.appearing, V2(0.5, 0.5))
         if imgui.begin_popup_modal("Export Textures", None, auto)[0]:
-            imgui.set_next_item_width(340 * s)
-            _, self.export_preset = imgui.combo("Output template", self.export_preset, EXPORT_PRESETS)
-            imgui.set_next_item_width(340 * s)
-            _, self.export_name = imgui.input_text("File name", self.export_name)
-            _tip("Used in every file name below.")
-            imgui.set_next_item_width(340 * s)
-            _, self.export_dir = imgui.input_text("Folder", self.export_dir)
-            imgui.same_line()
-            if imgui.button("Browse") and pfd is not None:
-                p = pfd.select_folder("Export folder", self.export_dir).result()
-                if p:
-                    self.export_dir = p
+            imgui.begin_child("##export-options", V2(660 * s, 310 * s), imgui.ChildFlags_.borders)
+            self._export_options()
+            imgui.end_child()
+            manifest, problem = None, None
+            try:
+                manifest = self._export_manifest()
+            except Exception as ex:
+                problem = str(ex)
             imgui.spacing()
             imgui.text("Files that will be written")
-            if imgui.begin_table("##files", 2, imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_outer):
-                for fn, what in self._export_files():
+            imgui.begin_child("##export-preview", V2(660 * s, 150 * s), imgui.ChildFlags_.borders)
+            if manifest and imgui.begin_table("##files", 2, imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_outer):
+                for fn, what in self._export_files(manifest):
                     imgui.table_next_row()
                     imgui.table_next_column(); imgui.text(fn)
                     imgui.table_next_column(); imgui.text_disabled(what)
                 imgui.end_table()
-            imgui.text_disabled(f"{self.engine.res} x {self.engine.res}, PNG, 16 px padding around UV islands.")
+            if problem:
+                imgui.text_wrapped(problem)
+            imgui.end_child()
+            imgui.text_wrapped("Larger outputs regenerate procedural fills and supported native paint. Legacy/imported raster bases and clone/smudge checkpoints are resampled.")
             if sys.platform == "win32":
                 _, self.export_open_folder = imgui.checkbox("Open the folder when done", self.export_open_folder)
+            imgui.begin_disabled(manifest is None)
             if imgui.button("Export", V2(120 * s, 0)):
                 try:
-                    files = export(self.engine, self.export_dir, self.export_preset, self.export_name or None)
+                    files = texture_exporter.write_export_manifest(self.engine, manifest)
                     self.msg(f"Exported {len(files)} maps to {self.export_dir}")
                     if self.export_open_folder and sys.platform == "win32":
                         os.startfile(self.export_dir)  # noqa
+                    imgui.close_current_popup()
                 except Exception as e:
                     traceback.print_exc()
                     self.msg(f"Export failed: {e}")
-                imgui.close_current_popup()
+            imgui.end_disabled()
             imgui.same_line()
             if imgui.button("Cancel", V2(120 * s, 0)) or imgui.is_key_pressed(imgui.Key.escape):
                 imgui.close_current_popup()

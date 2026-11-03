@@ -186,18 +186,21 @@ def decode_image(data: bytes, max_size: int | None = None):
     comps = _FORMATS.get(fmt, (1, 8))[0]
     if w <= 0 or h <= 0 or w > 16384 or h > 16384:
         raise SPFileError(f"bad image size {w}x{h}")
+    if w*h*comps*4>256*1024*1024:
+        raise SPFileError("Embedded image exceeds the 256 MiB decode budget; no reduced-resolution substitute was made")
+    if int(meta.get("tilesCount",0))<1:raise SPFileError("Embedded image has no tiles")
     out = np.zeros((h, w, comps), np.float32)
     compression = str(meta.get("compression", "jp2"))
     for _ in range(int(meta.get("tilesCount", 0))):
         if p + 24 > len(data):
-            break
+            raise SPFileError("Truncated embedded image tile header")
         x0, y0, x1, y1, size = struct.unpack_from("<IIIIQ", data, p)
         p += 24
         blob = data[p:p + size]
         p = (p + size + 7) & ~7
         tw, th = x1 - x0, y1 - y0
-        if tw <= 0 or th <= 0 or x1 > w or y1 > h:
-            continue
+        if tw <= 0 or th <= 0 or x1 > w or y1 > h or len(blob) != size:
+            raise SPFileError("Invalid or truncated embedded image tile")
         if compression == "jp2":
             im = Image.open(io.BytesIO(blob))
             im.load()
@@ -208,7 +211,7 @@ def decode_image(data: bytes, max_size: int | None = None):
             a = np.frombuffer(blob, dt, tw * th * comps).reshape(th, tw, comps).astype(np.float32)
             if bits != 32:
                 a /= float(2 ** bits - 1)
-        a = a[:th, :tw]
+        if a.shape[:2]!=(th,tw):raise SPFileError("Decoded embedded tile dimensions disagree with its header")
         if a.shape[2] != comps:
             a = _match_comps(a, comps)
         out[y0:y0 + a.shape[0], x0:x0 + a.shape[1]] = a

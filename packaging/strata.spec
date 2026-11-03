@@ -9,6 +9,8 @@ from PyInstaller.utils.hooks import collect_all
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 
 datas, binaries, hiddenimports = [], [], []
+# These scripts run in external Blender and must remain readable source assets.
+datas += [(os.path.join(ROOT,"strata",name),"strata") for name in ("blender_delivery.py","bundleio.py","unwrap_worker.py")]
 # imgui_bundle carries its fonts as data; glfw ships its native library inside the
 # package; moderngl picks its GL backend (glcontext) at runtime, so PyInstaller can't see it.
 for pkg in ("imgui_bundle", "glfw", "moderngl", "glcontext", "OpenGL"):

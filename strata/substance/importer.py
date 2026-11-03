@@ -29,6 +29,7 @@ def _best_preset(spf: SPFile):
     """Painter writes the same preset at several data versions for older releases; use the newest
     one that decodes."""
     best, err = None, None
+    spf._variant_errors=[]
     for name in spf.presets():
         try:
             root = spf.hbo(name)
@@ -37,6 +38,7 @@ def _best_preset(spf: SPFile):
                 best = (root, dv, name)
         except Exception as e:      # a damaged variant shouldn't stop us
             err = e
+            spf._variant_errors.append({"dataset":name,"error":str(e)})
     if best is None:
         raise SPFileError(f"{spf.name}: no readable layer preset ({err})")
     return best[0]
@@ -51,6 +53,8 @@ def load_smart_material(path: str) -> ImportResult:
         res.name = spf.name
         res.kind = "smart_material"
         res.version = spf.painter_version()
+        from .report import compatibility
+        res.report = compatibility(spf,root,res.notes,res.layers)
         return res
 
 
@@ -59,6 +63,7 @@ class SmartMask:
     name: str
     mask: MaskBuild | None
     notes: list
+    report: dict = field(default_factory=dict)
 
 
 def load_smart_mask(path: str) -> SmartMask:
@@ -67,7 +72,8 @@ def load_smart_mask(path: str) -> SmartMask:
         mb, notes = convert_mask_preset(root, spf, spf.name)
         if mb is not None and mb.trivial:
             mb = None
-        return SmartMask(spf.name, mb, notes)
+        from .report import compatibility
+        return SmartMask(spf.name, mb, notes, compatibility(spf,root,notes))
 
 
 def read_thumbnail(path: str):
@@ -227,6 +233,9 @@ def load_project(path: str, texture_set: int | str | None = None) -> ProjectImpo
         lines = notes.lines()
         for s in sets:
             s.result.notes = lines
+        from .report import compatibility
+        report = compatibility(spf,doc,lines,[il for item in sets for il in item.result.layers])
+        for item in sets:item.result.report=report
         cur = sets[active]
         return ProjectImport(spf.name, spf.painter_version(), cur.name, mesh, cur.resolution, cur.result,
                              names, sets, active)

@@ -40,6 +40,7 @@ class BakeSettings:
     id_generator: int = 0              # ID_GENERATORS index
     dilation: int = PAD
     enabled: dict = field(default_factory=lambda: {"ao": True, "thickness": True, "id": True})
+    external_maps: dict = field(default_factory=dict)
     # high poly -> low poly
     high_poly: list = field(default_factory=list)    # mesh file paths (in the low poly's space)
     hp_front: float = 0.02             # max frontal distance (fraction of mesh size)
@@ -48,9 +49,25 @@ class BakeSettings:
     id_from_high: bool = True          # ID from high-poly vertex colours (when id_source is Vertex Color)
     curv_from_normal: bool = True      # add normal-map detail to the curvature
     curv_normal_strength: float = 1.0
+    pairing: str = "all"
+    low_suffix: str = "_low"
+    high_suffix: str = "_high"
+    cage_path: str = ""
+    cage_hash: str = ""
+    supersampling: int = 1
+    ray_correction_pid: str = ""
+    distance_correction_pid: str = ""
+    correction_hashes: dict = field(default_factory=dict)
 
     def to_dict(self):
-        return asdict(self)
+        result = asdict(self)
+        if not self.external_maps:
+            result.pop("external_maps", None)
+        from .bakecontrol import DEFAULTS
+        for key, default in DEFAULTS.items():
+            if result[key] == default:
+                result.pop(key)
+        return result
 
     @staticmethod
     def from_dict(d):
@@ -58,6 +75,8 @@ class BakeSettings:
         for k, v in (d or {}).items():
             if hasattr(s, k):
                 setattr(s, k, v)
+        from .bakecontrol import validate_settings
+        validate_settings(s)
         return s
 
 
@@ -77,18 +96,69 @@ class BakeSet:
     normal_hp: moderngl.Texture = None     # tangent-space normal baked from the high poly
     height_hp: moderngl.Texture = None     # height baked from the high poly (0.5 = on the low poly)
     hp_hits: float = 0.0                   # fraction of texels whose ray found the high poly
+    projection: moderngl.Texture = None     # green hits, red misses, blue cage crossings; coverage alpha
 
     def maps(self) -> dict:
-        return {"position": self.pos, "world_normal": self.nrm, "curvature": self.curv,
+        result = {"position": self.pos, "world_normal": self.nrm, "curvature": self.curv,
                 "ao": self.ao, "thickness": self.thick, "id": self.id, "coverage": self.cov,
                 "part": self.part, "tangent": self.tangent, "normal": self.normal_hp,
                 "height": self.height_hp}
+        if self.projection is not None:
+            result["projection_diagnostics"] = self.projection
+        return result
 
     def release(self):
         for t in (self.pos, self.nrm, self.curv, self.ao, self.cov, self.thick, self.id, self.part,
-                  self.tangent, self.normal_hp, self.height_hp):
+                  self.tangent, self.normal_hp, self.height_hp, self.projection):
             if t is not None:
                 t.release()
+
+
+class _BakeContext:
+    def __init__(self, original):
+        object.__setattr__(self, "original", original)
+        object.__setattr__(self, "created", [])
+
+    def __getattr__(self, name):
+        original = getattr(self.original, name)
+        if name in ("framebuffer", "depth_texture", "depth_renderbuffer", "buffer", "vertex_array"):
+            def create(*args, **kwargs):
+                result = original(*args, **kwargs)
+                self.created.append(result)
+                return result
+            return create
+        return original
+
+    def __setattr__(self, name, value):
+        setattr(self.original, name, value)
+
+
+class _BakeAllocations:
+    def __init__(self, gpu):
+        self.original, self.created = gpu, []
+        self.ctx = _BakeContext(gpu.ctx)
+
+    def __getattr__(self, name):
+        return getattr(self.original, name)
+
+    def texture(self, *args, **kwargs):
+        result = self.original.texture(*args, **kwargs)
+        self.created.append(result)
+        return result
+
+    def resample(self, *args, **kwargs):
+        source, size = args[:2]
+        result = self.texture(size, source.components, dtype=source.dtype)
+        if size[0] < source.size[0]:
+            temporary = self.texture(source.size, source.components, dtype=source.dtype)
+            self.original.blit(source, temporary)
+            temporary.build_mipmaps()
+            temporary.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+            self.original.blit(temporary, result)
+            temporary.release()
+        else:
+            self.original.blit(source, result)
+        return result
 
 
 class Baker:
@@ -97,7 +167,77 @@ class Baker:
 
     def bake(self, gm: GPUMesh, res: int, ao_samples: int = None, ao_res: int = None,
              progress=None, subset=None, settings: BakeSettings | None = None,
-             high: list | None = None) -> BakeSet:
+             high: list | None = None, cage=None, ray_correction=None, distance_correction=None) -> BakeSet:
+        from .bakecontrol import validate_settings, validate_cage, pair_sources
+        st = BakeSettings.from_dict((settings or BakeSettings()).to_dict())
+        validate_settings(st)
+        if cage is not None:
+            if not high:
+                raise ValueError("A projection cage requires high-poly sources")
+            validate_cage(gm.mesh, cage)
+        if high and subset is None:
+            pair_sources(gm.mesh, high, st)  # reject unmatched names before allocations
+        factor = st.supersampling
+        if res * factor > self.gpu.ctx.info["GL_MAX_TEXTURE_SIZE"]:
+            raise ValueError("Supersampled bake exceeds the GPU texture dimension limit")
+        allocations = _BakeAllocations(self.gpu)
+        result = None
+        try:
+            working = BakeSettings.from_dict(st.to_dict())
+            working.dilation *= factor
+            working.curv_normal_strength *= factor
+            result = Baker(allocations)._bake(gm, res * factor, ao_samples, ao_res, progress, subset, working, high, cage,
+                                               ray_correction, distance_correction)
+            if factor > 1:
+                fields = {"position": "pos", "world_normal": "nrm", "curvature": "curv", "ao": "ao",
+                          "coverage": "cov", "thickness": "thick", "id": "id", "part": "part", "tangent": "tangent",
+                          "normal": "normal_hp", "height": "height_hp", "projection_diagnostics": "projection"}
+                for name, texture in result.maps().items():
+                    if texture is None:
+                        continue
+                    if name in ("coverage", "part", "id", "projection_diagnostics"):
+                        texture.filter = (moderngl.NEAREST, moderngl.NEAREST)
+                        reduced = allocations.texture((res, res), texture.components, dtype=texture.dtype, filt=False)
+                        allocations.blit(texture, reduced)
+                    else:
+                        reduced = allocations.resample(texture, (res, res))
+                        if name in ("world_normal", "normal", "tangent"):
+                            normalized = allocations.texture((res, res), reduced.components, dtype=reduced.dtype)
+                            program = allocations.fs_program("bake-reduce-normal", S.HEADER + """
+uniform sampler2D u_src; uniform int u_encoded, u_tangent;
+in vec2 v_uv; out vec4 o;
+void main(){vec4 s=texture(u_src,v_uv); vec3 n=u_encoded==1?s.xyz*2.0-1.0:s.xyz;
+n=length(n)>1e-8?normalize(n):vec3(0,0,1); o=vec4(u_encoded==1?n*.5+.5:n,u_tangent==1?(s.w<0.0?-1.0:1.0):s.w);}
+""")
+                            framebuffer = allocations.ctx.framebuffer([normalized])
+                            framebuffer.use()
+                            allocations.ctx.viewport = (0, 0, res, res)
+                            allocations.ctx.scissor = None
+                            allocations.ctx.disable(moderngl.BLEND | moderngl.DEPTH_TEST | moderngl.CULL_FACE)
+                            allocations.bind(program, {"u_src": (0, reduced)})
+                            allocations.set(program, "u_encoded", int(name == "normal"))
+                            allocations.set(program, "u_tangent", int(name == "tangent"))
+                            allocations.draw_quad(program)
+                            framebuffer.release()
+                            reduced = normalized
+                    setattr(result, fields[name], reduced)
+                result.res = res
+            result.settings = st
+            retained = {id(texture) for texture in result.maps().values() if texture is not None}
+            for texture in allocations.created:
+                if id(texture) not in retained:
+                    texture.release()
+            return result
+        except Exception:
+            for texture in allocations.created:
+                texture.release()
+            raise
+        finally:
+            for target in reversed(allocations.ctx.created):
+                target.release()
+
+    def _bake(self, gm, res, ao_samples=None, ao_res=None, progress=None, subset=None, settings=None, high=None, cage=None,
+              ray_correction=None, distance_correction=None):
         """Bake one texture set. high: high-poly Mesh objects (already in the low poly's space)."""
         st = settings or BakeSettings()
         if ao_samples is not None:
@@ -123,15 +263,22 @@ class Baker:
         gm.render(prog, subset)
         fbo.release()
 
-        hp = self._bake_high(gm, high, pos, nrm, tan, idt, res, st) if high else None
+        hp = self._bake_high(gm, high, pos, nrm, tan, idt, res, st, part, cage, ray_correction, distance_correction, subset) if high else None
         occluder, spos, snrm = gm, pos, nrm
         if hp is not None:
             occluder, spos, snrm = hp["gm"], hp["pos"], hp["nrm"]
-        ao, thick = self._bake_ao(occluder, spos, snrm, res, st, progress, frame=gm.mesh)
-        normal_hp = height_hp = None
+        if st.enabled.get("ao", True) or st.enabled.get("thickness", True):
+            ao, thick = self._bake_ao(occluder, spos, snrm, res, st, progress, frame=gm.mesh)
+        else:
+            ao, thick = g.texture((res, res), 4), g.texture((res, res), 4)
+        for key, texture, value in (("ao", ao, 1.), ("thickness", thick, 1.), ("id", idt, 0.)):
+            if not st.enabled.get(key, True):
+                g.fill(texture, (value, value, value, 1.))
+        normal_hp = height_hp = projection = None
         hits = 0.0
         if hp is not None:
             normal_hp, height_hp, hits = hp["normal"], hp["height"], hp["hits"]
+            projection = hp.get("projection")
             if st.curv_from_normal:
                 curv = self._curv_from_normal(normal_hp, curv, st.curv_normal_strength)
             for k in ("pos", "nrm", "info", "col"):
@@ -141,7 +288,7 @@ class Baker:
             if t is not None:
                 g.dilate(t, cov, st.dilation)
         return BakeSet(pos, nrm, curv, ao, cov, res, thick=thick, id=idt, part=part, settings=st,
-                       tangent=tan, normal_hp=normal_hp, height_hp=height_hp, hp_hits=hits)
+                       tangent=tan, normal_hp=normal_hp, height_hp=height_hp, hp_hits=hits, projection=projection)
 
     # ------------------------------------------------------------------ high poly
     @staticmethod
@@ -156,34 +303,101 @@ class Baker:
         return Mesh("high", P, np.concatenate(N), np.zeros((len(P), 2), np.float32), np.concatenate(I),
                     colors=np.concatenate(C)).finalize(light=True)
 
-    def _bake_high(self, gm, high, pos, nrm, tan, idt, res, st: BakeSettings):
+    def _bake_high(self, gm, high, pos, nrm, tan, idt, res, st: BakeSettings, part=None, cage=None,
+                   ray_correction=None, distance_correction=None, subset=None):
         g, ctx = self.gpu, self.gpu.ctx
+        from .bakecontrol import pair_sources
         hm = high if isinstance(high, Mesh) else self.merge_high(high)
-        grid = TriangleGrid(hm.positions, hm.normals, hm.indices, hm.colors)
-        tex = grid.upload(g)
         size = gm.mesh.radius * 2
         front, rear = float(st.hp_front * size), float(st.hp_rear * size)
         out = {"pos": g.texture((res, res), 4, dtype="f4"), "nrm": g.texture((res, res), 4),
                "info": g.texture((res, res), 4, dtype="f4", filt=False), "col": g.texture((res, res), 4, dtype="f1")}
         prog = g.fs_program("hp_ray", S.HP_RAY_FS)
-        units = {"u_pos": (0, pos), "u_nrm": (1, nrm), "u_tpos": (2, tex["tri_pos"]), "u_tnrm": (3, tex["tri_nrm"]),
-                 "u_tcol": (4, tex["tri_col"]), "u_cells": (5, tex["cells"]), "u_items": (6, tex["items"])}
-        g.bind(prog, units)
-        for k, v in grid.uniforms().items():
-            g.set(prog, k, v)
         g.set(prog, "u_front", front)
         g.set(prog, "u_rear", rear)
         g.set(prog, "u_ignoreBack", int(bool(st.hp_ignore_backface)))
         pos.filter = nrm.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        cage_pos = blocked = None
+        if cage is not None:
+            cg = GPUMesh(g, Mesh("Cage", cage.positions, gm.mesh.normals, gm.mesh.uvs, gm.mesh.indices,
+                                 tangents=gm.mesh.tangents, parts=gm.mesh.parts, colors=gm.mesh.colors,
+                                 tri_material=gm.mesh.tri_material, curvature=gm.mesh.curvature))
+            cage_pos = g.texture((res, res), 4, dtype="f4", filt=False)
+            cfbo = ctx.framebuffer([cage_pos])
+            try:
+                cfbo.use()
+                ctx.viewport = (0, 0, res, res)
+                ctx.scissor = None
+                cfbo.clear()
+                cp = g.program("cage_position", S.UV_VS, S.HEADER + "in vec3 v_pos; out vec4 o; void main(){o=vec4(v_pos,1.0);}")
+                if subset is None:
+                    cg.render(cp)
+                elif gm._subsets[subset] is not None:
+                    cg._subsets[subset] = ctx.buffer(gm._subsets[subset].read())
+                    cg.render(cp, subset)
+            finally:
+                cfbo.release()
+                cg.release()
+            grid = TriangleGrid(gm.mesh.positions, gm.mesh.normals, gm.mesh.indices)
+            low = grid.upload(g)
+            blocked = g.texture((res, res), 4, dtype="f1", filt=False)
+            block_fbo = ctx.framebuffer([blocked])
+            try:
+                block_fbo.use()
+                ctx.viewport = (0, 0, res, res)
+                ctx.disable(moderngl.BLEND | moderngl.DEPTH_TEST | moderngl.CULL_FACE)
+                cp = g.fs_program("cage_block", S.CAGE_BLOCK_FS)
+                g.bind(cp, {"u_pos": (0, pos), "u_nrm": (1, nrm), "u_tpos": (2, low["tri_pos"]),
+                    "u_tnrm": (3, low["tri_nrm"]), "u_tcol": (4, low["tri_col"]), "u_cells": (5, low["cells"]),
+                    "u_items": (6, low["items"]), "u_cage": (8, cage_pos), "u_rayCorrection": (9, ray_correction or g.black),
+                    "u_distanceCorrection": (10, distance_correction or g.black)})
+                for key, value in grid.uniforms().items():
+                    g.set(cp, key, value)
+                for key, value in {"u_front": front, "u_rear": rear, "u_bias": max(gm.mesh.radius * 1e-5, 1e-6),
+                                   "u_hasCage": 1, "u_hasRayCorrection": int(ray_correction is not None),
+                                   "u_hasDistanceCorrection": int(distance_correction is not None), "u_ignoreBack": 0}.items():
+                    g.set(cp, key, value)
+                g.draw_quad(cp)
+            finally:
+                block_fbo.release()
+                for texture in low.values():
+                    texture.release()
         fbo = ctx.framebuffer([out["pos"], out["nrm"], out["info"], out["col"]])
         fbo.use()
         ctx.viewport = (0, 0, res, res)
+        ctx.scissor = None
         ctx.disable(moderngl.BLEND | moderngl.DEPTH_TEST)
-        g.draw_quad(prog)
+        fbo.clear()
+        active_parts = None
+        if st.pairing == "name":
+            active_parts = set(g.read(part)[..., 0][g.read(pos)[..., 3] > .5].astype(int).tolist())
+        for part_id, sources in pair_sources(gm.mesh, high, st, active_parts):
+            matched = self.merge_high(sources)
+            grid = TriangleGrid(matched.positions, matched.normals, matched.indices, matched.colors)
+            tex = grid.upload(g)
+            try:
+                g.bind(prog, {"u_pos": (0, pos), "u_nrm": (1, nrm), "u_tpos": (2, tex["tri_pos"]),
+                    "u_tnrm": (3, tex["tri_nrm"]), "u_tcol": (4, tex["tri_col"]), "u_cells": (5, tex["cells"]),
+                    "u_items": (6, tex["items"]), "u_part": (7, part or g.black), "u_cage": (8, cage_pos or g.black),
+                    "u_rayCorrection": (9, ray_correction or g.black), "u_distanceCorrection": (10, distance_correction or g.black),
+                    "u_cageBlocked": (11, blocked or g.black)})
+                for key, value in grid.uniforms().items():
+                    g.set(prog, key, value)
+                g.set(prog, "u_partID", -1 if part_id is None else part_id)
+                g.set(prog, "u_hasCage", int(cage_pos is not None))
+                g.set(prog, "u_hasRayCorrection", int(ray_correction is not None))
+                g.set(prog, "u_hasDistanceCorrection", int(distance_correction is not None))
+                fbo.use()
+                ctx.viewport = (0, 0, res, res)
+                g.draw_quad(prog)
+            finally:
+                for texture in tex.values():
+                    texture.release()
         fbo.release()
+        if cage_pos is not None:
+            cage_pos.release()
+            blocked.release()
         pos.filter = nrm.filter = (moderngl.LINEAR, moderngl.LINEAR)
-        for t in tex.values():
-            t.release()
         normal_hp, height_hp = g.texture((res, res), 4), g.texture((res, res), 4)
         cprog = g.fs_program("hp_convert", S.HP_CONVERT_FS)
         g.bind(cprog, {"u_lnrm": (0, nrm), "u_tan": (1, tan), "u_hnrm": (2, out["nrm"]), "u_info": (3, out["info"])})
@@ -196,6 +410,16 @@ class Baker:
         fbo.release()
         info = g.read(out["info"])
         hits = float((info[..., 1] > 0.5).sum() / max(1, (g.read(pos)[..., 3] > 0.5).sum()))
+        if cage is not None or st.pairing != "all" or st.supersampling != 1 or st.ray_correction_pid or st.distance_correction_pid:
+            colors = np.zeros((res, res, 4), np.float32)
+            coverage = g.read(pos)[..., 3] > .5
+            colors[..., 0] = coverage & (info[..., 1] <= .5)
+            colors[..., 1] = coverage & (info[..., 1] > .5)
+            crossing = coverage & (info[..., 2] < -1.5)
+            colors[crossing, 0] = 0.
+            colors[..., 2] = crossing
+            colors[..., 3] = coverage
+            out["projection"] = g.texture((res, res), 4, colors, dtype="f1", filt=False)
         if st.id_source == 0 and st.id_from_high:
             g.blit(out["col"], idt)
         out["gm"] = GPUMesh(g, hm)

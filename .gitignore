@@ -8,3 +8,7 @@ ui_out/
 *.strata
 build/
 dist/
+.artifacts/
+
+# Keep the test suite local; do not commit or publish it.
+/tests/
