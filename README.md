@@ -316,6 +316,19 @@ Code map: `strata/mesh.py` (meshes, tangents, curvature, loaders), `baker.py`, `
 `ui/` (theme, command registry + palette, 2D view), `shaders.py` (all GLSL), `substance/` (Painter file import:
 HDF5/HBO/Qt readers, layer-stack converter, stroke replay, asset library).
 
+## AI Assistant
+
+**Window > AI Assistant** opens a dockable chat with your installed **Codex** or
+**Claude Code** agent. Sign in through the agent's CLI, choose it in the panel,
+and describe the changes you want. The agent can inspect the live project, edit
+native layers/materials/masks, paint UV paths, and check a fresh viewport image.
+Saving/exporting has an explicit panel toggle; edits use native undo.
+
+Other agents can connect through **Connection > Copy external MCP connection**.
+Chat history stays in local Strata settings, separate from portable projects.
+Source installations are supported; frozen integration is not yet qualified.
+See [setup, tools, privacy and limits](docs/AI_ASSISTANT.md).
+
 ## Tests
 
 ```

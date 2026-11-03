@@ -66,6 +66,7 @@ from . import authored as authored_model
 from .ui.native import NativeUI
 from .ui.memory import MemoryUI
 from .ui.tiles import TilesUI
+from .ui.assistant import AssistantUI
 from .tablet import TabletInput
 from .resources import BUILTIN_ALPHAS
 from .layers import ALIGNMENTS
@@ -87,7 +88,8 @@ LAYOUT_VERSION = 1
 # panel names match Painter's
 W_ASSETS, W_TSL, W_LAYERS, W_TSS, W_PROPS = "Assets", "Texture Set List", "Layer Stack", "Texture Set Settings", "Properties"
 W_DISPLAY, W_HISTORY, W_LOG, W_KEYS, W_SETTINGS = "Display Settings", "History", "Log", "Shortcuts", "Settings"
-DOCKED = [W_ASSETS, W_TSL, W_LAYERS, W_TSS, W_PROPS]
+W_AI = "AI Assistant"
+DOCKED = [W_ASSETS, W_TSL, W_LAYERS, W_TSS, W_PROPS, W_AI]
 FLOATING = [W_DISPLAY, W_HISTORY, W_LOG, W_KEYS, W_SETTINGS]
 
 VIEW_3D, VIEW_SPLIT, VIEW_2D = 0, 1, 2
@@ -334,6 +336,7 @@ class App:
         self.native_ui = NativeUI(self)
         self.memory_ui = MemoryUI(self)
         self.tiles_ui = TilesUI(self)
+        self.assistant_ui = AssistantUI(self, CONFIG_DIR)
         self._fill_projection_drag = None
         self.palette = Palette()
         self._assets = ([("smart", n) for n in SMART_MATERIALS] + [("mat", n) for n in MATERIALS]
@@ -1270,23 +1273,26 @@ class App:
     # ------------------------------------------------------------------ main loop
     def run(self):
         last = time.time()
-        while not glfw.window_should_close(self.window):
-            glfw.poll_events()
-            self.impl.process_inputs()
-            now = time.time()
-            self.fps = 0.9 * self.fps + 0.1 / max(now - last, 1e-4)
-            last = now
-            self.frame()
-            glfw.swap_buffers(self.window)
-            if self.pending and self._pending_shown >= 2:
-                label, fn = self.pending
-                self.pending = None
-                try:
-                    fn()
-                except Exception as e:
-                    traceback.print_exc()
-                    self.msg(f"{label.rstrip('.')} failed: {e}")
-            self.project_ui.tick()
+        try:
+            while not glfw.window_should_close(self.window):
+                glfw.poll_events()
+                self.impl.process_inputs()
+                now = time.time()
+                self.fps = 0.9 * self.fps + 0.1 / max(now - last, 1e-4)
+                last = now
+                self.frame()
+                glfw.swap_buffers(self.window)
+                if self.pending and self._pending_shown >= 2:
+                    label, fn = self.pending
+                    self.pending = None
+                    try:
+                        fn()
+                    except Exception as e:
+                        traceback.print_exc()
+                        self.msg(f"{label.rstrip('.')} failed: {e}")
+                self.project_ui.tick()
+        finally:
+            self.assistant_ui.close()
         self._save_settings()
         try:
             if self.ini_path:
@@ -1304,6 +1310,7 @@ class App:
         glfw.terminate()
 
     def frame(self):
+        self.assistant_ui.tick()
         imgui.new_frame()
         ww, wh = glfw.get_window_size(self.window)
         fw, fh = glfw.get_framebuffer_size(self.window)
@@ -1568,6 +1575,7 @@ class App:
         I.dock_builder_dock_window(W_LAYERS, layers)
         I.dock_builder_dock_window(W_TSS, layers)      # tabbed behind Layer Stack, as in Painter
         I.dock_builder_dock_window(W_PROPS, props)
+        I.dock_builder_dock_window(W_AI, props)
         I.dock_builder_finish(did)
         self._focus_layers = 3
 
@@ -2116,15 +2124,22 @@ class App:
     def panels(self, ww):
         for name, fn in ((W_ASSETS, self.assets_panel), (W_TSL, self.texset_panel),
                          (W_LAYERS, self.layers_panel), (W_TSS, self.texset_settings_panel),
-                         (W_PROPS, self.properties_panel)):
+                         (W_PROPS, self.properties_panel), (W_AI, self.assistant_ui.draw)):
             if not self.show[name]:
                 continue
             if (name == W_LAYERS and self._focus_layers
                     and not imgui.is_popup_open("", imgui.PopupFlags_.any_popup_id | imgui.PopupFlags_.any_popup_level)):
                 imgui.set_next_window_focus()      # Layer Stack is the front tab, as in Painter
                 self._focus_layers -= 1
-            imgui.begin(name, None)                # docked panels close from the Window menu only
-            fn()
+            if name == W_AI:
+                # Add the new tab without resetting a user's saved layout.
+                properties = imgui.internal.find_window_by_name(W_PROPS)
+                if properties is not None and properties.dock_id:
+                    imgui.set_next_window_dock_id(properties.dock_id, imgui.Cond_.first_use_ever)
+                imgui.set_next_window_size(V2(370 * self.ui_scale, 430 * self.ui_scale), imgui.Cond_.first_use_ever)
+            visible, _ = imgui.begin(name, None)   # docked panels close from the Window menu only
+            if name != W_AI or visible:
+                fn()
             imgui.end()
         s = self.ui_scale
         sizes = {W_DISPLAY: (330, 330), W_HISTORY: (300, 360), W_LOG: (460, 260), W_KEYS: (560, 600),

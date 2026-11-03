@@ -262,3 +262,13 @@ modules declare `STRATA_EXTENSION_API=1` and register namespaced callbacks.
 `install_ui_command` bridges a registered action to a separate native menu and
 the command palette. `strata.cli.run_job` and `python -m strata batch` share this
 API. See EXTENSIONS.md for exact signatures, ownership and error contracts.
+
+## Live AI tools
+
+`strata.ai_tools.StrataTools(engine, capture=None, on_save=None)` exposes a bounded
+provider-independent tool contract over the native engine. `specifications()`
+returns MCP-compatible schemas; `call(name, arguments)` validates and executes
+on the owning engine thread. File output defaults to disabled (`allow_output`).
+The desktop queues external calls onto that thread and provides viewport capture
+and successful-save destination callbacks. See [AI_ASSISTANT.md](AI_ASSISTANT.md)
+for connection, lifetime, native undo and supported-operation limits.

@@ -1,5 +1,13 @@
 # StrataPainter implementation plan for AI agents
 
+Additional scoped extension: **T22 — live AI assistant** adds a dockable provider
+chat, a bounded native tool contract, project documentation/state/viewport access,
+an authenticated local MCP bridge, native undo/cancellation and project-scoped
+conversation resume. Source acceptance requires real signed-in Codex and Claude
+Code edits plus resumed turns, a real-UI MCP/save/reopen check, input validation
+and native transaction regression. Qualification and remaining packaging/provider
+limits are recorded in IMPLEMENTATION_STATUS.md and AI_ASSISTANT.md.
+
 Date: October 25, 2026  
 Starting baseline: `cefb609`, plus the local capability review  
 Reference product: Adobe Substance 3D Painter 12.2 workflows

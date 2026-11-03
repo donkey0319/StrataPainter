@@ -25,6 +25,7 @@ Execution started October 25, 2026; T00–T04 integration completed October 26, 
 | T18 | coordinator, single-agent workflow | verified | Project-local scalar channels through paint/effects/portable replay/packing, independent F0/glossiness, clearcoat and physical vertex displacement with optional v13 storage. 16 CPU/GPU scenarios, 16 desktop assertions and actual Blender 5.1.2/Cycles references pass. Scalar, shader approximation and non-tessellated/single-tile displacement limits are explicit in SHADER_WORKFLOWS.md. |
 | T19 | coordinator, single-agent workflow | verified | Blender mesh/material bundles, real GLB interchange, explicit extension/batch API v1 and isolated optional Cycles rendering. 19 CPU/GPU/runtime cases and ten desktop assertions pass; actual multi-material Blender/Cycles reconstruction verifies pixels and material ownership. Single-tile/target/tangent/precision and unbuilt frozen-release limits are explicit in DELIVERY.md and EXTENSIONS.md. |
 | T21 | coordinator, single-agent workflow | verified | Fourteen CPU/runtime scenarios and twelve desktop assertions cover Blender single-/multi-tile preparation, fixed UVs, 11-page row wrapping, separate materials, source scale, per-page painting/reopen/delivery and revision guards. Bounded angle-seam allocation and unchanged-layout tiled revision limits are explicit in UV_PREPARATION_SCALE.md. |
+| T22 | coordinator, single-agent workflow | source verified | Dockable Codex/Claude Code chat, native tool schemas, authenticated live MCP bridge, viewport feedback and project-scoped conversation resume. Real signed-in turns verified for both providers. Source-only and bounded-tool limits are explicit in AI_ASSISTANT.md. |
 | T20 | coordinator, single-agent workflow | in_progress | Local qualification increment verified: guarded CPU lanes, hashed 45-check run, managed carried scene/UDIM variant, 512/2K/4K profiles, initial-stroke budget admission fix with focused reruns, and relocated source candidate. Known low-flow failure remains; current legacy UI logic passes. Tests stay local; syntax-only CI, frozen/physical-tablet/other-platform/remote gates remain explicit in VALIDATION.md and RELEASE_GATES.md. |
 
 ## File ownership for the first wave (T00–T02)
@@ -855,3 +856,56 @@ visually reviewed. Python compilation, both packaging recipe parses and working
 diff whitespace checks pass; no tests are indexed. Summary:
 `.artifacts/t21-summary.json`. No reference images, assertions or memory limits
 were weakened, and no release/build/publication was performed.
+
+## T22 live AI assistant extension — November 2, 2026
+
+Added **Window > AI Assistant** as a dockable tab beside Properties, preserving
+existing saved layouts. Installed Codex and Claude Code agents stream chat and
+operate the live project through 15 shared native tools. Agents receive a concise
+operating guide, allowlisted engine documentation, preset/effect catalogs,
+persistent layer IDs and fresh offscreen 3D viewport PNGs. No model training,
+new Python dependency or project-format change was introduced.
+
+The authenticated loopback bridge queues work onto the owning graphics thread;
+artist gestures and busy operations defer execution. Stop, project replacement
+(including reopening the same IDs) and exit revoke the connection and cancel
+queued edits. Native operations retain their existing undo boundaries. Saving
+and texture export require a panel toggle; successful saves update the desktop
+destination. Bounded chat history and backend session references stay in local
+settings, separate from portable projects. Dedicated per-project agent workspaces
+support Claude's directory-scoped session lookup. External stdio MCP clients use
+the same tool contract through a copied ephemeral connection.
+
+Qualification on installed Windows/Python 3.13/OpenGL runtime:
+
+- Eight focused CPU/RPC/MCP/GPU checks pass: strict invalid-input rejection,
+  documentation allowlist, authentication/browser-origin rejection, main-thread
+  execution, queued cancellation, stdio handshake/error handling, native material
+  edits, masks/effects, deterministic UV paint, undo/redo, portable reopen/export.
+- Thirteen existing identity checks and all 27 existing CPU/GPU transaction
+  checks pass (48 checks across these three suites).
+- Real-window stdio MCP smoke passes live edits, PNG feedback, portable save,
+  history persistence and same-project reopen/cancellation. The panel and both
+  providers' real conversation screenshots were inspected.
+- Real signed-in Codex **0.166.0-alpha.5.1** and Claude Code **2.1.91** each
+  inspect, create a named fill, set roughness to 0.61, capture a viewport image,
+  and confirm the value in a resumed second turn. Initial missing MCP annotations,
+  a temporary-directory cleanup race and Claude's directory-scoped resume issue
+  were corrected and the affected live workflows rerun successfully.
+- The existing UI logic suite's sole failure is the historically documented
+  panel-splitter cursor assertion. An unmodified HEAD app baseline passes this
+  run; the current app also passes with diagnostic framebuffer reads, with the
+  expected resize cursor appearing after the initial hover frame. Timing is
+  implicated but not conclusively established; no assertion/reference was changed.
+  Other shortcuts, paint, layer, mask, layout and cursor actions pass.
+- Python compilation and whitespace checks pass. Local evidence is under
+  `.artifacts/ai-ui/` and `.artifacts/ai-regression/`; the tests and evidence remain
+  ignored/unindexed. The known low-flow baseline was not changed or rerun here.
+
+Limits: Python source installation only; frozen packaging and other-platform
+runtime are unqualified. MCP is local stdio with tool discovery/calls, not a
+hosted/OAuth service. The tool surface covers a bounded subset of native features;
+whole-request atomic undo, arbitrary project replacement/import, every AI product
+and consumer-account interchangeability are not claimed. Muse needs a compatible
+interface or an additional provider adapter. Provider account eligibility and
+global/managed agent policy still apply. See AI_ASSISTANT.md for setup and data flow.
