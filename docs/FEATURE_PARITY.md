@@ -2,6 +2,8 @@
 
 Initial T00 ledger at `cefb609`, October 25, 2026; T01/T02 evidence updated October 26. This separates implementation evidence from user-facing availability. See [baseline commands and failures](BASELINE.md), [current implementation status](IMPLEMENTATION_STATUS.md), [capability review](STRATA_TEXTURE_PIPELINE_REVIEW.md) and [implementation plan](STRATA_PAINTER_IMPLEMENTATION_PLAN.md). Subsequent package owners must update only claims they actually verify.
 
+Painter UX compatibility is tracked separately in [the implementation and remaining-scope guide](PAINTER_UX_IMPLEMENTATION.md): target breadcrumbs, per-channel layer controls, inline effects, atomic forest drops, mask merge/replacement, rotated UV gestures/replay, native projection shortcuts, nonmodal bake controls and visual export authoring with optional v14 saved configuration. These are bounded workflow improvements, not a claim of full 12.2 tool/rendering equivalence.
+
 | Capability | Engine | Desktop UI | Save and export | Current validation |
 |---|---|---|---|---|
 | Material-based texture sets | Implemented | Set selection and multi-set export controls | Saved; distinct paths or collision rejection | T01 actual two-set pixels/manifest/UI and T02 independent settings verified |

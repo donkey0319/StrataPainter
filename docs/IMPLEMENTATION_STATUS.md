@@ -909,3 +909,50 @@ whole-request atomic undo, arbitrary project replacement/import, every AI produc
 and consumer-account interchangeability are not claimed. Muse needs a compatible
 interface or an additional provider adapter. Provider account eligibility and
 global/managed agent policy still apply. See AI_ASSISTANT.md for setup and data flow.
+
+## Painter UX compatibility increment — November 2, 2026
+
+Implemented the bounded authoring-workspace changes documented in
+[PAINTER_UX_IMPLEMENTATION.md](PAINTER_UX_IMPLEMENTATION.md): active-target/write-channel
+feedback, folder masks, per-channel row controls, inline effects, atomic forest drops,
+smart-mask merge/replace, set highlighting and scope feedback, rotated UV navigation/
+straight lines/resume, native projection shortcuts, F8/F9 bake controls, and visual
+export templates/results with optional v14 project-owned export configuration.
+Existing pipelines and dependencies are retained. Adobe's online screenshots were
+used because the owner's installed Painter subscription is expired.
+
+Qualification on the installed Windows/Python 3.13/RTX 4050 runtime:
+
+- Five new coordinate/GPU contracts pass: rotated inverses/matrices, rendering and
+  paint alignment, replay/portable restoration, bounded export settings/undo/load,
+  and atomic ordered forest moves/no-ops/cycle rejection.
+- The new desktop suite passes **31 assertions**, including real gestures, UV lines/
+  resume, F8/F9, channel isolation, masks, graphical template Apply, actual packed
+  export, project reopen, 150%/200% dialogs and projection transforms/undo.
+- A **38-suite focused regression** passed 36 suites, retained the known low-flow
+  feature failure (101/102), and found a stale W-unavailable expectation plus the
+  existing splitter-cursor failure in UI logic. The private W assertion was updated
+  to verify rejection of a non-fill target, with positive transform coverage in the
+  new suite. The splitter and low-flow assertions/references were not changed.
+- Corrected UI logic has only its documented splitter-cursor failure. Final visual
+  review also caught foreground UV labels drawing over dialogs; those guides now
+  yield to popups. The affected UV, new UX and UI-logic suites were rerun after that
+  fix: UV and UX pass; UI logic retains only the known splitter failure.
+- The 38-suite selection includes legacy archives, actual bake/material/channel/
+  tile/reimport UI, native replay, memory, transactions, persistence, headless
+  rendering, CPU contracts, unsaved handling and all eight assistant contracts.
+  This is a targeted selection, not the entire local qualification matrix.
+- Source/suite fingerprints are stable within the completed runs. Python compilation
+  and whitespace checks pass. Actual painting/baking/effects/export/high-DPI
+  screenshots were visually inspected. Tests and evidence remain ignored/unindexed.
+
+Evidence: `.artifacts/painter-ux-final-focused/report.json`,
+`.artifacts/painter-ux-ui-logic-corrected/report.json` and
+`.artifacts/painter-ux-overlay-final/report.json`. Superseded incomplete matrix
+attempts were stopped after review changes and are not qualification evidence.
+
+Full Painter parity remains incomplete. Quad-loop fill, full cage visualization,
+general transform gizmos, specialist shader/rendering/particle workflows, broader
+resource UX, proprietary graph fidelity and the existing tile/hardware/platform
+limits remain explicit in the companion's remaining-scope table. No release/tag,
+frozen build or full artist-migration certification is claimed.

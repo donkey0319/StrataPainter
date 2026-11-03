@@ -18,16 +18,79 @@ class BakeUI:
         self.last_frame = 0.
         self.map_key = 0
         self.diagnostic_tile = 0
+        self.settings_set = None
+        self.project_key = None
+        self.drafts = {}
+
+    def prepare(self):
+        app, engine = self.app, self.app.engine
+        identity = id(engine.mesh)
+        if identity != self.project_key:
+            self.project_key = identity
+            self.drafts = {}
+            self.settings_set = None
+        if self.settings_set != engine.ts.pid:
+            if self.settings_set is not None and app.bake_settings is not None:
+                self.drafts[self.settings_set] = app.bake_settings
+            app.bake_settings = self.drafts.get(engine.ts.pid) or BakeSettings.from_dict(engine.ts.bake_settings.to_dict())
+            self.settings_set = engine.ts.pid
+
+    def field(self, label):
+        available = imgui.get_content_region_avail().x
+        imgui.set_next_item_width(max(60 * self.app.ui_scale, available - imgui.calc_text_size(label).x - 12 * self.app.ui_scale))
+
+    def workspace(self):
+        """Non-modal bake workspace; artists can navigate and paint correction fields."""
+        app, engine = self.app, self.app.engine
+        self.prepare()
+        imgui.text("Baking - " + engine.ts.name)
+        imgui.text_wrapped("Inspect maps, adjust projection, paint correction fields, then bake. F9 returns to Painting.")
+        if imgui.button("Return to Painting (F9)"):
+            app._set_workspace_mode("paint")
+            return
+        settings = app.bake_settings
+        imgui.begin_child("##bake_workspace")
+        if imgui.collapsing_header("Common settings", imgui.TreeNodeFlags_.default_open):
+            self.field("AO samples")
+            _, settings.ao_samples = imgui.slider_int("AO samples", settings.ao_samples, 4, 256)
+            self.field("AO spread")
+            _, settings.ao_spread = imgui.slider_float("AO spread", float(settings.ao_spread), 10, 90, "%.0f deg")
+            self.field("AO max distance")
+            _, settings.ao_max_distance = imgui.slider_float("AO max distance", float(settings.ao_max_distance), 0, 1)
+            _, settings.ground_plane = imgui.checkbox("Ground plane (AO)", settings.ground_plane)
+            self.field("Thickness distance")
+            _, settings.thickness_max_distance = imgui.slider_float("Thickness distance", float(settings.thickness_max_distance), .05, 1.)
+            _, settings.curv_from_normal = imgui.checkbox("Add normal-map detail to curvature", settings.curv_from_normal)
+            self.field("Dilation (px)")
+            _, settings.dilation = imgui.slider_int("Dilation (px)", settings.dilation, 0, 64)
+            self.source_controls(settings)
+        if len(engine.sets) > 1:
+            _, app.bake_all = imgui.checkbox("Bake every texture set", app.bake_all)
+        if imgui.button("Bake mesh maps", V2(-1, 0)):
+            snapshot = BakeSettings.from_dict(copy.deepcopy(settings.to_dict()))
+            all_sets = bool(app.bake_all and len(engine.sets) > 1)
+            app._run_busy("Baking mesh maps...", lambda: self.run(snapshot, all_sets))
+        imgui.separator()
+        # These use the existing transactional map/correction paths, not a second baker.
+        previous_filter = getattr(app, "_flt", "")
+        app._flt = ""
+        self.mesh_maps()
+        app._flt = previous_filter
+        imgui.end_child()
 
     def source_controls(self, settings):
         app = self.app
         imgui.separator()
         imgui.text("High-poly sources")
+        self.field("High/low pairing")
         _, pairing = imgui.combo("High/low pairing", int(settings.pairing == "name"), ["All sources", "Match mesh/part names"])
         settings.pairing = ("all", "name")[pairing]
         if settings.pairing == "name":
+            self.field("Low name suffix")
             _, settings.low_suffix = imgui.input_text("Low name suffix", settings.low_suffix)
+            self.field("High name suffix")
             _, settings.high_suffix = imgui.input_text("High name suffix", settings.high_suffix)
+        self.field("Bake supersampling")
         _, sampling = imgui.combo("Bake supersampling", (1, 2, 4).index(settings.supersampling), ["1x", "2x", "4x"])
         settings.supersampling = (1, 2, 4)[sampling]
         if settings.cage_path:
@@ -50,10 +113,14 @@ class BakeUI:
             path = app._load_mesh_file("High-poly source")
             if path and path not in settings.high_poly:
                 settings.high_poly.append(path)
+        self.field("Frontal distance")
         _, settings.hp_front = imgui.slider_float("Frontal distance", float(settings.hp_front), .0001, .5)
+        self.field("Rear distance")
         _, settings.hp_rear = imgui.slider_float("Rear distance", float(settings.hp_rear), .0001, .5)
         _, settings.hp_ignore_backface = imgui.checkbox("Ignore high-poly backfaces", settings.hp_ignore_backface)
+        self.field("ID source")
         _, settings.id_source = imgui.combo("ID source", settings.id_source, ID_SOURCES)
+        self.field("ID generation")
         _, settings.id_generator = imgui.combo("ID generation", settings.id_generator, ID_GENERATORS)
         _, settings.id_from_high = imgui.checkbox("ID from high-poly vertex colors", settings.id_from_high)
         for key, label in (("ao", "Bake AO"), ("thickness", "Bake thickness"), ("id", "Bake ID")):

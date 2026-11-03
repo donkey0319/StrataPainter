@@ -16,6 +16,41 @@ class EffectsUI:
         self.pick_target = None
         self.color = [.5, .5, .5]
 
+    def rows(self, layer, mask):
+        """Show the selected thumbnail's effect stack directly beneath its owner."""
+        app, engine = self.app, self.app.engine
+        stack = layer.mask_effects if mask else layer.effects
+        if not stack:
+            return
+        imgui.indent(32 * app.ui_scale)
+        imgui.push_id("inline-mask" if mask else "inline-content")
+        try:
+            for effect in list(reversed(stack)):
+                imgui.push_id(effect.pid)
+                changed, enabled = imgui.checkbox("##effect_enabled", effect.enabled)
+                app._edit_value("Enable effect", effect, "enabled", enabled, changed)
+                imgui.same_line()
+                if imgui.selectable(effect.name + "##effect_row", self.selected.get((layer.pid, mask)) == effect.pid)[0]:
+                    app._finish_property_edit()
+                    self.selected[(layer.pid, mask)] = effect.pid
+                    if mask and effect.kind == "paint":
+                        engine.set_mask_paint_target(effect)
+                    app.prop_filter = "Mask effects" if mask else "Content effects"
+                    app._show_win("Properties", True)
+                if imgui.begin_popup_context_item("##effect_actions"):
+                    for label, action in (("Move up", lambda: engine.move_effect(effect, 1, layer)),
+                                          ("Move down", lambda: engine.move_effect(effect, -1, layer)),
+                                          ("Duplicate", lambda: engine.copy_effect(effect, layer)),
+                                          ("Delete effect", lambda: engine.remove_effect(effect, layer))):
+                        if imgui.menu_item(label)[0]:
+                            app._finish_property_edit()
+                            action()
+                    imgui.end_popup()
+                imgui.pop_id()
+        finally:
+            imgui.pop_id()
+            imgui.unindent(32 * app.ui_scale)
+
     def param(self, effect, key, label, kind="slider", lo=0., hi=1., choices=None):
         app = self.app
         if not app._row(label):

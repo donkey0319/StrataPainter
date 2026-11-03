@@ -5,6 +5,13 @@ Strata saves schema version 3 projects (version 4 when independent mask paint is
 projects remain readable. Unsupported future versions are rejected before the
 current project is replaced.
 
+Optional schema v14 adds project-owned export configuration: the resolved template,
+destination, selected set identities, map overrides, format/depth, output size and
+padding. Save settings or a successful export records it as undoable document
+metadata. It restores without writing any output. Projects without this optional
+configuration retain their prior minimum version; the current reader supports
+v1–v14. Older readers explicitly reject v14. See EXPORT.md.
+
 Version 4 adds validated per-effect mask-paint arrays. Projects without these
 effects continue to save as v3. See [effect storage and compatibility](EFFECTS.md).
 

@@ -23,11 +23,13 @@ class UVMapping:
     size: tuple
     zoom: float = 1.
     center: tuple = (.5, .5)
+    rotation: float = 0.  # radians; view state, also retained by native stroke provenance
 
     def __post_init__(self):
         if (len(self.size) != 2 or min(self.size) <= 0 or not np.isfinite(self.size).all()
                 or not np.isfinite(self.zoom) or self.zoom <= 0
-                or len(self.center) != 2 or not np.isfinite(self.center).all()):
+                or len(self.center) != 2 or not np.isfinite(self.center).all()
+                or not np.isfinite(self.rotation)):
             raise ValueError("Invalid UV view dimensions, zoom or center")
         object.__setattr__(self, "size", tuple(self.size))
         object.__setattr__(self, "center", tuple(self.center))
@@ -43,14 +45,27 @@ class UVMapping:
         return float(self.scale[0] / self.size[0])
 
     def uv(self, pixel):
-        return (np.asarray(pixel) / self.size - .5) * self.scale + self.center
+        return self.uv_delta(np.asarray(pixel) - np.asarray(self.size) * .5) + self.center
 
     def pixel(self, uv):
-        return ((np.asarray(uv) - self.center) / self.scale + .5) * self.size
+        return self.pixel_delta(np.asarray(uv) - self.center) + np.asarray(self.size) * .5
+
+    @property
+    def axes(self):
+        c, s = np.cos(self.rotation), np.sin(self.rotation)
+        return np.array([[c, -s], [s, c]])
+
+    def uv_delta(self, pixels):
+        return (np.asarray(pixels) * self.scale / self.size) @ self.axes.T
+
+    def pixel_delta(self, uv):
+        return (np.asarray(uv) @ self.axes) / self.scale * self.size
 
     def matrix(self):
-        sx, sy = 2 / self.scale
-        return np.array([[sx, 0, -sx * self.center[0]], [0, sy, -sy * self.center[1]], [0, 0, 1]], np.float32)
+        matrix = np.eye(3)
+        matrix[:2, :2] = np.diag(2 / self.scale) @ self.axes.T
+        matrix[:2, 2] = -matrix[:2, :2] @ self.center
+        return matrix.astype(np.float32)
 
 
 def uv_triangle(mesh, triangles, uv, single_tile=True):

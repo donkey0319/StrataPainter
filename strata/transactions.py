@@ -5,7 +5,7 @@ import copy
 from dataclasses import dataclass, fields, is_dataclass
 
 _EXCLUDED = {"uid", "pid", "archive_id", "tex", "mask_tex", "children", "effects", "mask_effects", "expanded", "raster_res"}
-_PLAIN_FIELDS = {"Engine": ("normal_strength", "user_channels", "shader_workflow"), "TextureSet": ("name", "description")}
+_PLAIN_FIELDS = {"Engine": ("normal_strength", "user_channels", "shader_workflow", "export_settings"), "TextureSet": ("name", "description")}
 
 
 @dataclass(eq=False)

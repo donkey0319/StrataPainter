@@ -120,6 +120,7 @@ class Engine:
         self.last_replay = None           # substance.apply.ReplayStats of the last Painter import
         self.import_state = None
         self.import_reports = []
+        self.export_settings = {}
         self._edit_serial = 0             # bumped by every undoable edit (paint, masks, layer tree)
         self._serial_counter = 0
         self._saved_serial = 0
@@ -351,6 +352,9 @@ class Engine:
     def set_properties(self, target, **changes):
         """Undoable property assignment; joins an active continuous/multitarget edit."""
         self._validate_edit_target(target)
+        if target is self and "export_settings" in changes:
+            from .exportsettings import validate as validate_export_settings
+            changes["export_settings"] = validate_export_settings(changes["export_settings"])
         from .userchannels import validate as validate_channels, layer_values
         if target is self and ("user_channels" in changes or "shader_workflow" in changes):
             definitions = changes.get("user_channels", self.user_channels)
@@ -610,6 +614,7 @@ class Engine:
         self.mask_paint_target = None
         self.reimport_checkpoint = None
         self.import_state, self.import_reports, self.last_replay = None, [], None
+        self.export_settings = {}
         self.journal = Journal()
         self.undo_stack, self.redo_stack = [], []
         for ts in self.sets:
@@ -1603,6 +1608,45 @@ class Engine:
         self.select(layer)
         self.dirty = True
 
+    def move_layers_to(self, layers, parent=None, index=None):
+        """Move an ordered forest in one undo step; index refers to the original target list."""
+        self._finish_stroke()
+        self.commit_edit()
+        active = self.all_layers()
+        requested = {id(layer) for layer in layers}
+        if any(identity not in {id(layer) for layer in active} for identity in requested):
+            raise ValueError("Moved layers must belong to the active texture set")
+        roots = [layer for layer in active if id(layer) in requested and not any(
+            other is not layer and id(other) in requested and any(child is layer for child in other.walk())
+            for other in active)]
+        if not roots:
+            return False
+        if parent is not None and (not parent.is_group or not any(layer is parent for layer in active)):
+            raise ValueError("Destination must be a folder in the active texture set")
+        if parent is not None and any(any(child is parent for child in layer.walk()) for layer in roots):
+            raise ValueError("A folder cannot be moved inside itself or a descendant")
+        target = parent.children if parent is not None else self.layers
+        if index is not None and (type(index) is not int or not 0 <= index <= len(target)):
+            raise ValueError("Invalid layer insertion position")
+        insertion = len(target) if index is None else index
+        moved = {id(layer) for layer in roots}
+        insertion -= sum(id(layer) in moved for layer in target[:insertion])
+        lists = {id(target): (target, [layer for layer in target if id(layer) not in moved])}
+        for layer in roots:
+            source, _, _ = self.find(layer)
+            lists[id(source)] = (source, [item for item in source if id(item) not in moved])
+        replacement = lists[id(target)][1]
+        replacement[insertion:insertion] = roots
+        if all(len(original) == len(updated) and all(a is b for a, b in zip(original, updated))
+               for original, updated in lists.values()):
+            return False
+        self._push_undo(self._snapshot_stack())
+        for original, updated in lists.values():
+            original[:] = updated
+        self.select(roots[-1])
+        self.dirty = True
+        return True
+
     def group_layers(self, layers: list, name="Folder") -> Layer:
         """Wrap sibling layers in a new group placed where the topmost one was."""
         if not layers:
@@ -2070,7 +2114,7 @@ class Engine:
                     return False
                 if getattr(self, "clone_uv_offset", None) is None:
                     self.clone_uv_offset = np.asarray(source) - surf.uv
-                offset = self.clone_uv_offset / view.uv_mapping.scale * view.size
+                offset = view.uv_mapping.pixel_delta(self.clone_uv_offset)
             else:
                 if self.clone_source is None:
                     return False
@@ -2195,7 +2239,7 @@ class Engine:
         if mapping is not None:
             self._stroke.view = self._uv_view(mapping)
             if self._stroke.tool == TOOL_CLONE:
-                self._stroke.clone_offset = self.clone_uv_offset / mapping.scale * mapping.size
+                self._stroke.clone_offset = mapping.pixel_delta(self.clone_uv_offset)
         info = self.pick_uv(uv)
         if info is None:
             self._stroke.recorded_samples.append({"event": "break", "uv": np.asarray(uv).tolist(),
@@ -2516,6 +2560,7 @@ class Engine:
                            "layers": [strip(l.to_dict()) for l in ts.layers]} for ts in self.sets]}
         state["user_channels"] = self.user_channels
         state["shader_workflow"] = self.shader_workflow
+        state["export_settings"] = self.export_settings
         if self.import_state:
             state["import_replay"]={k:v for k,v in self.import_state.items() if k!="tasks"}
         if self.color.managed:
@@ -2614,6 +2659,8 @@ class Engine:
                             ("exposure", "env_rot", "emissive_intensity", "alpha_test", "use_ao")}}
         if meta["brush"].get("user_channel") not in self.user_channels:
             meta["brush"]["user_channel"] = None
+        if self.export_settings:
+            meta["export_settings"] = copy.deepcopy(self.export_settings)
         if any(e.kind == "paint" for ts in self.sets for l in self._walk(ts.layers) for e in l.mask_effects):
             meta["version"] = 4
         if any(layer.raster_res is not None and layer.raster_res != ts.res for ts in self.sets for layer in self._walk(ts.layers)):
@@ -2640,6 +2687,8 @@ class Engine:
             meta["version"] = 13
             meta["user_channels"] = copy.deepcopy(self.user_channels)
             meta["shader_workflow"] = copy.deepcopy(self.shader_workflow)
+        if self.export_settings:
+            meta["version"] = 14
         meta, blobs, records, diagnostics = projectio.package_resources(
             meta, path, portable, self.project_resources, BUILTIN_ALPHAS)
         for sd in meta["sets"]:
@@ -2726,6 +2775,7 @@ class Engine:
 
     def _restore_project(self, meta, original, data, progress=None):
         from .userchannels import DEFAULT_WORKFLOW
+        self.export_settings = copy.deepcopy(meta.get("export_settings", {}))
         self.user_channels = copy.deepcopy(meta.get("user_channels", {}))
         self.shader_workflow = copy.deepcopy(meta.get("shader_workflow", DEFAULT_WORKFLOW))
         self.import_reports=copy.deepcopy(meta.get("imports",{}).get("reports",[]))

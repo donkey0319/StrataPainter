@@ -17,9 +17,10 @@ uniform sampler2D u_tangent, u_worldNormal;
 uniform vec3 u_bmin, u_bmax;
 uniform int u_materialModel, u_hasCoat;
 uniform int u_mode; uniform vec2 u_scale; uniform vec2 u_center; uniform vec2 u_px;
+uniform mat2 u_uvAxes;
 in vec2 v_uv; out vec4 o;
 void main() {
-    vec2 uv = (v_uv - 0.5) * u_scale + u_center;
+    vec2 uv = u_uvAxes * ((v_uv - 0.5) * u_scale) + u_center;
     vec2 cell = floor(v_uv / u_px / 12.0);
     vec3 bg = vec3(mod(cell.x + cell.y, 2.0) < 1.0 ? 0.085 : 0.11);
     if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) { o = vec4(bg * 0.8, 1.0); return; }
@@ -73,6 +74,7 @@ class UVView:
         self.prog = gpu.fs_program("uvview", UV_FS)
         self.zoom = 1.0
         self.center = [0.5, 0.5]
+        self.rotation = 0.
         self.wire = False
         self.tile_source = None
         self.diagnostics = []
@@ -80,23 +82,28 @@ class UVView:
 
     def reset(self):
         self.zoom, self.center = 1.0, [0.5, 0.5]
+        self.rotation = 0.
         self.min_zoom = .25
 
     def _scale(self, w, h):
         return tuple(self.mapping(w, h).scale)
 
     def mapping(self, w, h):
-        return UVMapping((max(int(w), 1), max(int(h), 1)), self.zoom, tuple(self.center))
+        return UVMapping((max(int(w), 1), max(int(h), 1)), self.zoom, tuple(self.center), self.rotation)
 
     def pan(self, dx, dy, w, h):
-        sx, sy = self._scale(w, h)
-        self.center[0] -= dx / w * sx
-        self.center[1] += dy / h * sy
+        self.center = (np.asarray(self.center) + self.mapping(w, h).uv_delta((-dx, dy))).tolist()
+
+    def anchor(self, uv, pixel, size):
+        """Keep a UV point fixed under the pointer while changing the view."""
+        mapping = self.mapping(*size)
+        self.center = (np.asarray(self.center) + np.asarray(uv) - mapping.uv(pixel)).tolist()
 
     def zoom_by(self, steps):
         self.zoom = min(max(self.zoom * (1.15 ** steps), self.min_zoom), 32.0)
 
     def fit_tiles(self, engine, size):
+        self.rotation = 0.
         addresses = engine.ts.tile_addresses
         low = np.min([address.to_list() for address in addresses], axis=0)
         high = np.max([address.to_list() for address in addresses], axis=0) + 1
@@ -123,7 +130,8 @@ class UVView:
         self.diagnostics = []
         try:
             for address in material.addresses:
-                lo, hi = mapping.pixel(address.to_list()), mapping.pixel(np.array(address.to_list()) + 1)
+                corners = mapping.pixel(np.asarray(address.to_list()) + np.array(((0, 0), (1, 0), (0, 1), (1, 1))))
+                lo, hi = corners.min(axis=0), corners.max(axis=0)
                 left, bottom = max(0, int(np.floor(lo[0]))), max(0, int(np.floor(lo[1])))
                 right, top = min(w, int(np.ceil(hi[0]))), min(h, int(np.ceil(hi[1])))
                 if right <= left or top <= bottom:
@@ -197,6 +205,7 @@ class UVView:
                         ("u_bmin", tuple(engine.mesh.positions.min(0))), ("u_bmax", tuple(engine.mesh.positions.max(0)))):
             if name in p:
                 p[name] = v
+        p["u_uvAxes"].write(np.ascontiguousarray(self.mapping(w, h).axes.T, np.float32).tobytes())
         self.gpu.draw_quad(p)
         if self.wire and _tile is None:
             self._wire(engine, rect, comp.color)

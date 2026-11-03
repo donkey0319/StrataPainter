@@ -1,5 +1,11 @@
 # StrataPainter implementation plan for AI agents
 
+**Painter UX follow-through:** [PAINTER_UX_IMPLEMENTATION.md](PAINTER_UX_IMPLEMENTATION.md)
+records the November 2 compatibility-workspace increment and outstanding requirements
+from [the UX reference](SUBSTANCE_PAINTER_UX_REFERENCE.md). It extends existing T03/T05–T09
+paths and adds optional v14 export configuration. Read its remaining-scope table before
+assigning further parity work; it does not close the advanced feature or release gates.
+
 Additional scoped extension: **T22 — live AI assistant** adds a dockable provider
 chat, a bounded native tool contract, project documentation/state/viewport access,
 an authenticated local MCP bridge, native undo/cancellation and project-scoped

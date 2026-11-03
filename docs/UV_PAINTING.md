@@ -7,6 +7,15 @@ include their corresponding channels or mesh-map diagnostics; Material is a flat
 base-color inspection in 2D rather than a lit surface. The cursor uses the same
 coordinate mapping and size calculation as brush evaluation.
 
+Alt+left rotates around the pointer; Alt+Shift+left snaps to orthogonal angles.
+Alt+middle or Ctrl+Alt+left pans; Alt+right zooms. The wheel also zooms around the
+pointer. Ctrl+right adjusts brush size/hardness, Ctrl+left flow/angle, and
+Shift+right rotates the environment. A right-click opens quick brush properties;
+the existing right-drag pan remains available. View rotation is shared by rendering,
+wireframe, picking, clone sampling, stencil/projection and native stroke replay.
+Reset 2D view or Frame UV tiles clears rotation. Shift-click draws a straight UV
+stroke from the previous UV stroke on the same target; Ctrl+Shift-click snaps it.
+
 Paint, erase, base masks, independent mask paint, quick masks, seven-channel
 projection, stencil placement, clone and smudge use the existing engine painter
 and undo/storage/compositor/export pipeline. Hold V and click a UV island to set

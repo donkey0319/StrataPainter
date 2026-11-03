@@ -2,6 +2,8 @@
 
 Research date: November 2, 2026. Reference baseline: Adobe Substance 3D Painter 12.2, released October 21, 2026. Audience: implementation, design, QA, and review agents working on Strata Painter.
 
+Implementation follow-through: [completed UX changes and outstanding requirements](PAINTER_UX_IMPLEMENTATION.md). This reference remains the target contract; the companion records the actual implementation scope and qualification boundaries.
+
 ## 1. Purpose and how to use this document
 
 The product goal is that an experienced Painter artist can open Strata and complete familiar work with minimal relearning: find the same concepts, use familiar gestures, predict the destination of edits, and obtain dependable outputs. Familiar appearance must be backed by equivalent operations and editable data.

@@ -18,7 +18,7 @@ import zipfile
 
 import numpy as np
 
-VERSION = 13
+VERSION = 14
 _HASH = re.compile(r"^[a-f0-9]{64}$")
 _BAKES = {"position": (4, "f4"), "world_normal": (4, "f2"), "curvature": (4, "f2"),
           "projection_diagnostics": (4, "f1"),
@@ -158,6 +158,11 @@ def validate(meta, arrays):
     version = meta.get("version", 1)
     if version < 1 or version > VERSION:
         raise ValueError(f"Unsupported project version {version}; supported through {VERSION}")
+    if "export_settings" in meta:
+        from .exportsettings import validate as validate_export_settings
+        if version < 14:
+            raise ValueError("Project export settings require version 14")
+        validate_export_settings(meta["export_settings"])
     from .userchannels import validate as validate_channels, layer_values, DEFAULT_WORKFLOW
     user_definitions = meta.get("user_channels", {})
     if ("user_channels" in meta or "shader_workflow" in meta) and version < 13:

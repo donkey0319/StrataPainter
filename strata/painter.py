@@ -181,6 +181,8 @@ class Painter:
         if mapping is not None:
             set_(p, "u_uvScale", tuple(mapping.scale))
             set_(p, "u_uvCenter", tuple(np.asarray(mapping.center) - tile))
+            if "u_uvAxes" in p:
+                p["u_uvAxes"].write(np.ascontiguousarray(mapping.axes.T, np.float32).tobytes())
         if dab is not None:
             T, B, N = dab.frame
             hit = np.asarray(dab.hit, float).copy()

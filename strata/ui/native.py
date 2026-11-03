@@ -35,7 +35,7 @@ class NativeUI:
         app.msg("Saved native asset: " + os.path.basename(path))
         return path
 
-    def apply(self, kind, path, target=None):
+    def apply(self, kind, path, target=None, replace=False):
         app, e = self.app, self.app.engine
         if kind == "smart_materials":
             library.load_smart_material(e, path, parent=target if target is not None and target.is_group else None)
@@ -43,7 +43,7 @@ class NativeUI:
             layer = target or e.layer
             if layer is None:
                 raise ValueError("Drop a smart mask on a layer")
-            library.apply_smart_mask(e, layer, path, replace=True)
+            library.apply_smart_mask(e, layer, path, replace=replace)
         elif kind == "brushes":
             library.load_brush_preset(e.brush, path)
         elif kind == "templates":
@@ -53,7 +53,7 @@ class NativeUI:
 
     def drop(self, token, target):
         try:
-            self.apply(*self.payloads[token], target=target)
+            self.apply(*self.payloads[token], target=target, replace=imgui.get_io().key_ctrl)
         except Exception as error:
             self.app.msg(f"Native asset failed: {error}")
 
@@ -79,7 +79,7 @@ class NativeUI:
         imgui.same_line()
         if imgui.button("Refresh native assets"):
             self.refresh()
-        imgui.text_wrapped("Double-click to apply, or drag onto the Layer Stack. Saved dependencies are portable.")
+        imgui.text_wrapped("Double-click to apply, or drag onto the Layer Stack. Smart masks merge effects; Ctrl-drop replaces them. Saved dependencies are portable.")
         imgui.begin_child("##native_assets")
         for name, path in self.entries:
             if app.asset_query.casefold() not in name.casefold():

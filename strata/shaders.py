@@ -954,6 +954,7 @@ uniform float u_radius;
 uniform vec3 u_fT, u_fB, u_fN;      // tangent frame at the hit (T along the stamp's x)
 uniform int u_uvView;
 uniform vec2 u_uvScale, u_uvCenter;
+uniform mat2 u_uvAxes;
 uniform sampler2D u_uvCoverage;
 uniform int u_align;                // 0 camera, 1 tangent wrap, 2 tangent planar, 3 uv
 uniform vec2 u_hitUV;
@@ -998,7 +999,7 @@ float dabAlpha() {
     if (u_uvView == 1) {
         P = vec3(v_uv, 0.0); N = vec3(0.0, 0.0, 1.0); g_P = P;
         c = vec4(0.0, 0.0, 0.0, 1.0);
-        g_screen = (v_uv - u_uvCenter) / u_uvScale + 0.5;
+        g_screen = (transpose(u_uvAxes) * (v_uv - u_uvCenter)) / u_uvScale + 0.5;
         if (texture(u_uvCoverage, v_uv).r < 0.5) return -1.0;
     }
     if (u_full == 1) return 1.0;
@@ -1112,7 +1113,7 @@ void main() {
     if (u_uvView == 0 && (s2.x < 0.0 || s2.y < 0.0 || s2.x > 1.0 || s2.y > 1.0)) discard;
     vec2 suv;
     if (u_uvView == 1) {
-        suv = (s2 - 0.5) * u_uvScale + u_uvCenter;
+        suv = u_uvAxes * ((s2 - 0.5) * u_uvScale) + u_uvCenter;
         if (any(lessThan(suv, vec2(0.0))) || any(greaterThan(suv, vec2(1.0))) || texture(u_uvCoverage, suv).r < 0.5) discard;
     } else {
         if (texture(u_pickPos, s2).a < 0.5) discard;

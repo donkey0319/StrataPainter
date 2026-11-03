@@ -41,7 +41,7 @@ from .engine import Engine
 from . import exporter as texture_exporter
 from .baker import BakeSettings
 from .channels import CHANNEL_DESCRIPTORS
-from .layers import BLEND_MODES, CHANNELS, GENERATORS, HEIGHT_BLEND, STENCIL_TILING, SYMMETRY
+from .layers import BLEND_MODES, CHANNELS, GENERATORS, HEIGHT_BLEND, STENCIL_TILING, SYMMETRY, MASK_EFFECTS, CONTENT_EFFECTS
 from .layers import _ids as _layer_ids
 from .painter import TOOL_CLONE, TOOL_PAINT, TOOL_PROJECTION, TOOL_SMUDGE, stencil_matrix
 from .mesh import BUILTIN_MESHES, load_mesh
@@ -57,6 +57,7 @@ from .ui.uvview import UVView
 from .ui.project import ProjectUI
 from .ui.material import MaterialUI
 from .ui.effects import EffectsUI
+from .ui.export import ExportUI
 from .ui.bake import BakeUI
 from .ui.imports import ImportUI
 from .ui.authored import AuthoredUI
@@ -130,7 +131,7 @@ MOUSE_HELP = [
     ("Disable / enable a layer's mask", "Shift + click its mask thumbnail"),
     ("Paint a mask", "Click the layer's mask thumbnail"),
     ("Select several layers", "Ctrl + click, Shift + click"),
-    ("2D view", "Wheel zoom, Middle or Right drag pan"),
+    ("2D view", "Alt+Left rotate (Shift snaps), Alt+Middle pan, Alt+Right zoom, wheel zoom"),
     ("Open a file", "Drag .obj / .fbx / .gltf / .strata / .spp onto the window"),
     ("Use a Painter smart material", "Drag a .spsm onto the window, or use Assets > Substance"),
     ("Add a material / smart material", "Double-click it in Assets, or drag it onto the Layer Stack"),
@@ -277,7 +278,7 @@ class App:
         self.show = {w: True for w in DOCKED}
         self.show.update({w: False for w in FLOATING})
         self.show.update({k: v for k, v in self.settings.get("show", {}).items() if k in self.show})
-        self.view_mode = int(self.settings.get("view_mode", VIEW_3D))
+        self.view_mode = int(self.settings.get("view_mode", VIEW_SPLIT))
         self.ui_hidden = False
         self.thumb = int(self.settings.get("thumb", 64))
         self.asset_query, self.asset_sel = "", None
@@ -289,6 +290,9 @@ class App:
         self._focus_layers = 0
         # tools and modes behind Painter's shortcuts
         self.poly_fill, self.fill_mode, self.clone_absolute = False, 2, False
+        self.layer_channel = 0  # 0: all channels; 1..7: one channel's blend and opacity
+        self.workspace_mode = "paint"
+        self._hover_set = None
         self.lazy_last, self.sym_last = 25.0, 1
         self.quick_edit, self._prev_target = False, 0
         self.paused, self.isolate, self.view_swap = False, False, False
@@ -298,6 +302,7 @@ class App:
         self._wire_hl = None              # (mesh id, tri, mode, set) -> highlighted polygon-fill triangles
         self.clipboard, self.content_clip = [], None
         self._last_hit, self._resume = None, False
+        self._last_uv_hit = None
         self.open_bake = self.open_close = False
         self.open_quit, self._quit_ok, self._close_unsaved = False, False, False
         self.bake_settings, self.bake_all = None, True
@@ -328,6 +333,9 @@ class App:
         self.project_ui = ProjectUI(self, CONFIG_DIR, pfd)
         self.material_ui = MaterialUI(self)
         self.effects_ui = EffectsUI(self)
+        self.export_ui = ExportUI(self)
+        self.export_results = []
+        self.export_results_requested = False
         self.bake_ui = BakeUI(self)
         self.import_ui = ImportUI(self)
         self.authored_ui = AuthoredUI(self)
@@ -398,6 +406,8 @@ class App:
         self._pending_shown = 0
 
     def _new_project(self, mesh, res):
+        self.workspace_mode = "paint"
+        self._last_uv_hit = None
         self._finish_fill_projection(cancel=True)
         self._finish_property_edit()
         t = time.time()
@@ -408,6 +418,7 @@ class App:
                                              "angle_degrees": self.new_uv_angle, "rotate": self.new_uv_rotate,
                                              "resolution": int(res), "tile_count": self.new_uv_tiles} if self.new_auto_uv else None,
                                 source_unit=[None, "m", "cm", "mm", "in", "ft"][self.new_unit])
+        self.export_ui.restore()
         self.material_ui.transform_tool = None
         self.material_ui.transform_layer_pid = None
         self.project_path = None
@@ -453,6 +464,9 @@ class App:
         self._finish_fill_projection(cancel=True)
         self._finish_property_edit()
         self.engine.load(path)
+        self.export_ui.restore()
+        self.workspace_mode = "paint"
+        self._last_uv_hit = None
         self.material_ui.transform_tool = None
         self.material_ui.transform_layer_pid = None
         backup = re.search(r"\.bak[0-9]+$", os.fspath(path), re.IGNORECASE)
@@ -589,7 +603,7 @@ class App:
             self._log_notes(res.notes)
         self.import_ui.run(apply)
 
-    def _apply_sp_mask(self, path, idx=None):
+    def _apply_sp_mask(self, path, idx=None, replace=False):
         try:
             sm = self._sp_result(path)
         except Exception as e:
@@ -600,7 +614,7 @@ class App:
             self.msg(f"{sm.name}: no mask Strata can use (see Log)")
         else:
             def apply():
-                if self.engine.apply_mask_state(sm.mask, idx, report=sm.report, progress=self.import_ui.progress, max_dabs=self.import_ui.max_dabs, per_layer=self.import_ui.per_layer):
+                if self.engine.apply_mask_state(sm.mask, idx, replace=replace, report=sm.report, progress=self.import_ui.progress, max_dabs=self.import_ui.max_dabs, per_layer=self.import_ui.per_layer):
                     self.msg(f"Applied Substance smart mask: {sm.name}")
             self.import_ui.run(apply)
         self._log_notes(sm.notes)
@@ -687,7 +701,11 @@ class App:
         self.engine.brush.mode = m
 
     def _set_target(self, t):
+        self.engine.end_stroke()
+        self.drag = None
         self.engine.brush.target = t
+        if t == 1:
+            self.engine.set_mask_paint_target(None)
 
     def _insert_point(self):
         """(parent, index) just above the selected layer, inside its folder if it is in one."""
@@ -721,24 +739,28 @@ class App:
         eng.ts.selected = min(max(eng.ts.selected, 0), len(eng.layers) - 1)
         eng.dirty = True
 
-    def _drop_layer_on(self, src, dst):
+    def _drop_layer_on(self, src, dst, placement="auto"):
         """Layer drag-and-drop: onto a folder = into it, onto a layer = just above it, None = bottom."""
         eng = self.engine
-        if src is dst:
+        moved = self._top_selected() if src.uid in self.sel_uids else [src]
+        if any(layer is dst for layer in moved):
             return
-        if dst is not None and any(l is dst for l in src.walk()):
+        if dst is not None and any(any(l is dst for l in layer.walk()) for layer in moved):
             self.msg("A folder can't be moved into itself.")
             return
         if dst is None:
-            eng.move_layer_to(src, None, 0)
-        elif dst.is_group:
-            eng.move_layer_to(src, dst, len(dst.children))
+            parent, index = None, 0
+        elif dst.is_group and placement in ("auto", "inside"):
+            parent, index = dst, len(dst.children)
             dst.expanded = True
         else:
             lst, i, parent = eng.find(dst)
-            slst, si, _ = eng.find(src)
-            eng.move_layer_to(src, parent, i if (slst is lst and si < i) else i + 1)
-        eng.select(src)
+            index = i if placement == "below" else i + 1
+        eng.move_layers_to(moved, parent, index)
+        primary = src if any(layer is src for layer in moved) else moved[-1]
+        eng.select(primary)
+        self.sel_uids = {layer.uid for layer in moved}
+        self._last_primary = primary.uid
         eng.dirty = True
 
     def _nudge(self, delta):
@@ -922,6 +944,10 @@ class App:
 
     # -- tools and modes
     def _set_tool(self, tool, erase=False, absolute=False):
+        self.engine.end_stroke()
+        self.drag = None
+        self._finish_fill_projection(cancel=True)
+        self.material_ui.transform_tool = self.material_ui.transform_layer_pid = None
         b = self.engine.brush
         self.poly_fill = tool == TOOL_FILL
         if tool != TOOL_FILL:
@@ -1016,7 +1042,39 @@ class App:
         self.bake_settings = BakeSettings.from_dict(ts.bake_settings.to_dict())
         self.open_bake = True
 
+    def _set_workspace_mode(self, mode):
+        self._finish_fill_projection(cancel=True)
+        self.engine.end_stroke()
+        self.drag = None
+        self._finish_property_edit()
+        if mode == "bake":
+            self.bake_ui.prepare()
+        self.workspace_mode = mode
+        self._show_win(W_PROPS, True)
+        self.msg("Baking mode: configure maps and corrections in Properties; F9 returns to painting."
+                 if mode == "bake" else "Painting mode")
+
+    def _projection_eligible(self):
+        layer = self.engine.layer
+        if layer is None or layer.kind != "fill" or self.engine.brush.target != 0:
+            return "Select fill-layer content to transform its projection."
+        return True if layer.maps or layer.authored is not None else "Assign a bitmap or surface object to the fill layer first."
+
+    def _projection_tool(self, tool=None):
+        self._finish_fill_projection(cancel=True)
+        self._finish_property_edit()
+        current = self.material_ui.transform_tool
+        chosen = tool if tool else (None if current else getattr(self, "_last_projection_tool", "translate"))
+        self.material_ui.transform_tool = chosen
+        self.material_ui.transform_layer_pid = self.engine.layer.pid if chosen else None
+        if chosen:
+            self._last_projection_tool = chosen
+        self.msg((chosen.title() + " projection: drag in a viewport; Q finishes; Escape cancels the drag.")
+                 if chosen else "Projection transform finished")
+
     def _close_project(self):
+        self.workspace_mode = "paint"
+        self._last_uv_hit = None
         self._finish_fill_projection(cancel=True)
         self.material_ui.transform_tool = None
         self.material_ui.transform_layer_pid = None
@@ -1077,7 +1135,7 @@ class App:
 
         def has_last():
             r = has()
-            return r if r is not True else (True if self._last_hit is not None else "Paint a stroke first.")
+            return r if r is not True else (True if self._last_hit is not None or self._last_uv_hit is not None else "Paint a stroke first.")
 
         def is_group():
             r = lay_ok()
@@ -1104,9 +1162,10 @@ class App:
         R.add("edit.settings", "Settings...", "Edit", lambda: self._show_win(W_SETTINGS, True))
 
         # --- Modes
-        R.add("mode.bake", "Baking mode (mesh map baking)", "Modes", self._open_bake, ["F8"], has)
-        R.add("mode.paint", "Painting mode", "Modes", noop, ["F9"],
-              na("Strata is always in painting mode; F8 / Ctrl+Shift+B opens mesh-map baking."))
+        R.add("mode.bake", "Baking", "Modes", lambda: self._set_workspace_mode("bake"), ["F8"], has,
+              checked=lambda: self.workspace_mode == "bake")
+        R.add("mode.paint", "Painting", "Modes", lambda: self._set_workspace_mode("paint"), ["F9"], has,
+              checked=lambda: self.workspace_mode == "paint")
 
         # --- Tools
         R.add("tool.paint", "Paint", "Tools", lambda: self._set_tool(TOOL_PAINT), ["1"], has,
@@ -1238,7 +1297,13 @@ class App:
                                 ("manip.scale", "Manipulator: scale", ["R"]),
                                 ("manip.surface", "Manipulator: surface", ["Shift+W"]),
                                 ("manip.warp", "Toggle warp edit mode", ["Shift+V"])):
-            R.add(cid, name, NA, noop, keys, na(manip), in_palette=False)
+            tool = {"manip.translate": "translate", "manip.rotate": "rotate", "manip.scale": "scale", "manip.show": None}
+            if cid in tool:
+                R.add(cid, name, "Projection", lambda selected=tool[cid]: self._projection_tool(selected), keys,
+                      self._projection_eligible,
+                      checked=lambda selected=tool[cid]: bool(self.material_ui.transform_tool) if selected is None else self.material_ui.transform_tool == selected)
+            else:
+                R.add(cid, name, NA, noop, keys, na(manip), in_palette=False)
         R.add("na.render", "Rendering mode (Iray)", NA, noop, ["F10"], na("Iray rendering isn't available in Strata yet."),
               in_palette=False)
         R.add("na.particles", "Paint / Eraser / Projection + particles", NA, noop, ["Ctrl+1", "Ctrl+2", "Ctrl+3"],
@@ -1329,6 +1394,7 @@ class App:
             right = ww - self.dock_strip(ww, top, wh - status_h)
         area = (left, top, max(right - left, 1), max(wh - top - status_h, 1))
         central = self.dock_host(area, active=has_project and not self.ui_hidden)
+        self._hover_set = None
         if has_project and not self.ui_hidden:
             self.panels(ww)
         vp = central if (has_project and not self.ui_hidden) else (0, menu_h, ww, max(wh - menu_h - status_h, 1))
@@ -1427,6 +1493,10 @@ class App:
     def _apply_cursor(self):
         """Show the mouse cursor ImGui asks for (resize arrows over splitters and edges, I-beam in text)."""
         want = imgui.get_mouse_cursor()
+        if self._over(self.vp_rect) and self.engine.ts is not None:
+            hit = self.engine._last_pick
+            if hit is not None and self.engine._set_of_tri(hit["tri"]) != self.engine.active:
+                want = imgui.MouseCursor_.not_allowed
         if (self.engine.comp is not None and self._cursor_visible() and want == imgui.MouseCursor_.arrow
                 and (self._over_viewport() or self.drag == "paint")):
             want = imgui.MouseCursor_.none           # the brush circle is the cursor on the mesh
@@ -1479,6 +1549,7 @@ class App:
         r.mode = mode
         if self.poly_fill and sets:
             self._draw_fill_wire(rect, cursor)
+        self._draw_set_highlight(rect)
         r.draw_symmetry(e.gm, e._vp, rect, e.brush, [key for key, _, _ in sets])
         if cursor is not None:
             hit, nrm = cursor
@@ -1488,7 +1559,7 @@ class App:
         """Polygon fill shows the mesh's faces and edges, and tints what a click would fill."""
         e = self.engine
         topo = e.mesh.topology
-        visible = tuple(i for i, ts in enumerate(e.sets) if ts.visible and (not self.isolate or i == e.active))
+        visible = (e.active,) if e.ts.visible else ()
         only = np.concatenate([e.sets[i].tri_ids for i in visible]) if visible else np.empty(0, np.int64)
         key = (id(e.mesh), visible)
         hl = None
@@ -1501,6 +1572,22 @@ class App:
                 self._wire_hl = (hk, e.mesh.positions[e.mesh.indices[tris]])
             hl = self._wire_hl
         e.renderer.draw_wire(key, lambda: topo.wire_segments(only), e.camera, e._vp, rect, hl)
+
+    def _draw_set_highlight(self, rect):
+        e = self.engine
+        chosen = self._hover_set
+        io = imgui.get_io()
+        if (chosen is None and io.key_ctrl and io.key_alt and self._over(self.vp_rect)
+                and not any(imgui.is_mouse_down(k) for k in (0, 1, 2))):
+            info = e.pick_info(*self._mouse_vp())
+            chosen = info["set"] if info else None
+        if chosen is None or not 0 <= chosen < len(e.sets) or not e.sets[chosen].visible:
+            return
+        empty = np.empty((0, 2, 3), np.float32)
+        ts = e.sets[chosen]
+        key = ("set-hover", id(e.mesh), ts.pid)
+        e.renderer.draw_wire(("set-hover-empty",), lambda: (empty, empty), e.camera, e._vp, rect,
+                             (key, e.mesh.positions[e.mesh.indices[ts.tri_ids]]))
 
     def welcome(self, vp):
         x, y, w, h = vp
@@ -1715,14 +1802,14 @@ class App:
                 (self.engine.cancel_edit if cancel else self.engine.commit_edit)()
             self._property_edit_key = None
 
-    def _edit_value(self, label, obj, attr, value, changed, multi=False, continuous=False):
+    def _edit_value(self, label, obj, attr, value, changed, multi=False, continuous=False, element=None):
         """One document transaction per gesture, including multi-layer controls."""
         eng = self.engine
         targets = self._sel_layers() if multi else [obj]
         if not any(target is obj for target in targets):
             targets = [obj] + targets
         targets = list({id(target): target for target in targets}.values())
-        key = (id(obj), attr, label)
+        key = (id(obj), attr, label, element)
         active = imgui.is_item_active() if continuous else False
         deactivated = imgui.is_item_deactivated() if continuous else False
         if changed:
@@ -1731,7 +1818,11 @@ class App:
             if not eng.edit_active:
                 eng.begin_edit(targets, label=label)
             for target in targets:
-                eng.set_property(target, attr, copy.deepcopy(value))
+                updated = copy.deepcopy(value)
+                if element is not None:
+                    updated = list(getattr(target, attr))
+                    updated[element] = value
+                eng.set_property(target, attr, updated)
             if continuous:
                 self._property_edit_key = key
             else:
@@ -1873,9 +1964,36 @@ class App:
             eng.select(lay)
             self._anchor = i
         self._last_primary = eng.layer.uid if eng.layer is not None else None
-        if target is not None and not lay.is_group:
+        if target is not None:
             eng.brush.target = target
+            if target == 1:
+                eng.set_mask_paint_target(None)
         eng.dirty = True
+
+    def _editing_context(self):
+        """Shared target breadcrumb; display inspection never determines paint writes."""
+        eng, b = self.engine, self.engine.brush
+        if eng.ts is None:
+            return "No project"
+        parts = [eng.ts.name]
+        if b.target == 2:
+            parts.append("Quick mask")
+        elif eng.layer is not None:
+            parts += [eng.layer.name, "Mask" if b.target == 1 else "Content"]
+            effect = eng.active_mask_paint() if b.target == 1 else None
+            if effect is not None:
+                parts.append(effect.name)
+        else:
+            parts.append("No layer selected")
+        return " > ".join(parts)
+
+    def _writing_channels(self):
+        b = self.engine.brush
+        if b.target:
+            return "Grayscale"
+        if b.user_channel:
+            return b.user_channel
+        return ", ".join(c.value_label or c.label for c in CHANNEL_DESCRIPTORS if b.enabled[c.index]) or "None"
 
     # ------------------------------------------------------------------ chrome: menu, toolbar, strips
     def _menu_cmd(self, cid, label=None):
@@ -1900,6 +2018,11 @@ class App:
             if imgui.begin_menu("Edit"):
                 for cid in ("edit.undo", "edit.redo", None, "edit.settings"):
                     imgui.separator() if cid is None else self._menu_cmd(cid)
+                imgui.end_menu()
+            if imgui.begin_menu("Mode"):
+                self._menu_cmd("mode.paint")
+                self._menu_cmd("mode.bake")
+                self._menu_cmd("na.render")
                 imgui.end_menu()
             if imgui.begin_menu("Layer"):
                 self._menu_cmd("layer.add_paint"); self._menu_cmd("layer.add_fill")
@@ -2037,7 +2160,8 @@ class App:
             imgui.same_line()
             t = self._seg("tb_target", [f"{ICON.layers} Layer", f"{ICON.mask} Mask"], min(b.target, 1),
                           ["Paint the layer's content", "Paint the layer's mask (or click the mask thumbnail)"])
-            b.target = t
+            if b.target != t:
+                self._set_target(t)
             imgui.same_line()
         if b.target in (1, 2):
             v = self._seg("tb_mval", ["White", "Black"], 0 if b.mask_value > 0.5 else 1,
@@ -2435,6 +2559,18 @@ class App:
             if imgui.selectable(label, i == eng.active)[0] and i != eng.active:
                 eng.set_active(i)
                 self.sel_uids, self._last_primary = set(), None
+            if imgui.is_item_hovered():
+                self._hover_set = i
+            if imgui.begin_popup_context_item("##texture_set_menu" + ts.pid):
+                if imgui.menu_item("Isolate this texture set", "Alt+Q", self.isolate and i == eng.active)[0]:
+                    eng.set_active(i)
+                    self.isolate = not self.isolate
+                for text, value in (("Show all texture sets", True), ("Hide all texture sets", False)):
+                    if imgui.menu_item(text)[0]:
+                        for item in eng.sets:
+                            item.visible = value
+                        self.isolate = False
+                imgui.end_popup()
             _tip("Click to paint this texture set.  Ctrl+Alt+Right click in the viewport picks the set under the cursor.")
             r = f"{ts.res} px"
             imgui.same_line(imgui.get_window_width() - imgui.calc_text_size(r).x - 14 * self.ui_scale)
@@ -2475,6 +2611,10 @@ class App:
     def layers_panel(self):
         eng = self.engine
         s = self.ui_scale
+        imgui.set_next_item_width(-1)
+        _, self.layer_channel = imgui.combo("##layer_channel", self.layer_channel,
+                                          ["All channels"] + [c.value_label for c in CHANNEL_DESCRIPTORS])
+        _tip("Inspect blend/opacity for this channel. This does not change brush channel enables or the viewport.")
         self._cmd_btn(ICON.paint, "layer.add_paint")
         imgui.same_line(0, 2)
         self._cmd_btn(ICON.fill, "layer.add_fill")
@@ -2535,12 +2675,18 @@ class App:
             if imgui.begin_drag_drop_source():
                 imgui.set_drag_drop_payload_py_id("STRATA_LAYER", lay.uid)
                 imgui.text(lay.name)
-                imgui.text_disabled("Drop on a folder to put it inside")
+                imgui.text_disabled("Drag top/bottom to insert; drop in a folder's center to nest.")
                 imgui.end_drag_drop_source()
             if imgui.begin_drag_drop_target():
+                fraction = (io.mouse_pos.y - p.y) / row_h
+                placement = ("inside" if lay.is_group and .25 <= fraction <= .75
+                             else "above" if fraction < .5 else "below")
+                if placement != "inside":
+                    line_y = p.y if placement == "above" else p.y + row_h
+                    dl.add_line(V2(p.x, line_y), V2(p.x + w, line_y), col32(*ACCENT), 2 * s)
                 pl = imgui.accept_drag_drop_payload_py_id("STRATA_LAYER")
                 if pl is not None:
-                    drop_layer = (pl.data_id, lay)
+                    drop_layer = (pl.data_id, lay, placement)
                 pl = imgui.accept_drag_drop_payload_py_id("STRATA_ASSET")
                 if pl is not None:
                     drop_asset = (pl.data_id, lay)
@@ -2596,7 +2742,7 @@ class App:
                 self._click_layer(lay, target=0, rows=row_layers)
             _tip("Folder" if lay.is_group else "Layer content: click to paint / edit the layer itself")
             self._layer_thumb(dl, lay, x, ty, ts)
-            if primary and eng.brush.target == 0 and not lay.is_group:
+            if primary and eng.brush.target == 0:
                 dl.add_rect(V2(x - 2, ty - 2), V2(x + ts + 2, ty + ts + 2), col32(1, 1, 1, 0.9), rounding=3, thickness=2)
             x += ts + 4 * s
             has_mask = lay.has_mask or lay.gen.kind or lay.mask_effects
@@ -2617,8 +2763,11 @@ class App:
                 if primary and eng.brush.target == 1:
                     dl.add_rect(V2(x - 2, ty - 2), V2(x + ts + 2, ty + ts + 2), col32(1, 1, 1, 0.9), rounding=3, thickness=2)
                 x += ts + 6 * s
-            bname = BLEND_MODES[lay.blend] if 0 <= lay.blend < len(BLEND_MODES) else "?"
-            bo = f"{BLEND_SHORT.get(bname, bname[:4])} {int(round(lay.opacity * 100))}"
+            ci = self.layer_channel - 1
+            blend = lay.blend if ci < 0 or lay.chan_blend[ci] in (None, -1) else lay.chan_blend[ci]
+            opacity = lay.opacity if ci < 0 else lay.chan_opacity[ci]
+            bname = BLEND_MODES[blend] if 0 <= blend < len(BLEND_MODES) else "?"
+            bo = f"{BLEND_SHORT.get(bname, bname[:4])} {int(round(opacity * 100))}"
             bw = imgui.calc_text_size("Ovrl 100").x + imgui.get_style().frame_padding.x * 2 + 4 * s
             bx = p.x + w - bw - 4 * s
             imgui.set_cursor_screen_pos(V2(bx, p.y + (row_h - fh) / 2))
@@ -2631,11 +2780,15 @@ class App:
             if imgui.begin_popup("##blend"):
                 _esc_closes()
                 imgui.set_next_item_width(180 * s)
-                ch, v = imgui.combo("Blend", lay.blend, BLEND_MODES)
-                self._edit_value("Layer blend", lay, "blend", v, ch, multi=True)
+                modes = ["Inherit layer"] + BLEND_MODES if ci >= 0 else BLEND_MODES
+                current = 0 if ci >= 0 and lay.chan_blend[ci] in (None, -1) else blend + (1 if ci >= 0 else 0)
+                ch, v = imgui.combo("Blend", current, modes)
+                self._edit_value("Layer blend", lay, "chan_blend" if ci >= 0 else "blend",
+                                 v - 1 if ci >= 0 else v, ch, multi=True, element=ci if ci >= 0 else None)
                 imgui.set_next_item_width(180 * s)
-                ch, v = imgui.slider_float("Opacity", lay.opacity, 0, 1, "%.2f")
-                self._edit_value("Layer opacity", lay, "opacity", v, ch, multi=True, continuous=True)
+                ch, v = imgui.slider_float("Opacity", opacity, 0, 1, "%.2f")
+                self._edit_value("Layer opacity", lay, "chan_opacity" if ci >= 0 else "opacity", v, ch,
+                                 multi=True, continuous=True, element=ci if ci >= 0 else None)
                 imgui.end_popup()
             name_w = bx - x - 4 * s
             if self.renaming == lay.uid:
@@ -2669,6 +2822,8 @@ class App:
                     sub += " (mask off)"
                 dl.add_text(V2(x, p.y + row_h / 2 + 1), col32(*kc, 0.75), _ellipsize(sub, name_w))
             imgui.set_cursor_screen_pos(V2(p.x, p.y + row_h + 1))
+            if primary:
+                self.effects_ui.rows(lay, eng.brush.target == 1)
             imgui.pop_id()
         avail = imgui.get_content_region_avail()
         imgui.invisible_button("##drop_bottom", V2(max(avail.x, 1), max(avail.y, row_h)))
@@ -2684,17 +2839,17 @@ class App:
                 drop_native = (pl.data_id, None)
             pl = imgui.accept_drag_drop_payload_py_id("STRATA_LAYER")
             if pl is not None:
-                drop_layer = (pl.data_id, None)
+                drop_layer = (pl.data_id, None, "below")
             imgui.end_drag_drop_target()
         if not eng.layers:
             imgui.set_cursor_pos(V2(10 * s, 10 * s))
             imgui.text_disabled("Empty. Add a layer with the buttons above,\nor drag a material from Assets.")
         imgui.end_child()
         if drop_layer is not None:
-            uid, dst = drop_layer
+            uid, dst, placement = drop_layer
             src = next((l for l in eng.all_layers() if l.uid == uid), None)
             if src is not None:
-                self._drop_layer_on(src, dst)
+                self._drop_layer_on(src, dst, placement)
         if drop_asset is not None:
             gi, dst = drop_asset
             kind, key = self._assets[gi]
@@ -2728,13 +2883,21 @@ class App:
             elif dst is not None:
                 eng.select(dst)
                 self._sync_selection()
-                self._apply_sp_mask(it.path)
+                self._apply_sp_mask(it.path, replace=io.key_ctrl)
             else:
                 self.msg("Drop a smart mask onto a layer.")
 
     def _layer_context_menu(self, lay):
         if imgui.menu_item("Rename", "Double-click", False)[0]:
             self.renaming, self.rename_buf, self._rename_focus = lay.uid, lay.name, True
+        if imgui.begin_menu("Add effect"):
+            mask = self.engine.brush.target == 1
+            for kind in (MASK_EFFECTS if mask else CONTENT_EFFECTS):
+                if imgui.menu_item(kind.replace("_", " ").title())[0]:
+                    effect = self.engine.add_effect(kind, layer=lay, mask=mask)
+                    self.effects_ui.selected[(lay.pid, mask)] = effect.pid
+                    self.prop_filter = "Mask effects" if mask else "Content effects"
+            imgui.end_menu()
         for cid in ("layer.copy", "layer.cut", "layer.paste", "layer.duplicate", "layer.delete", None,
                     "layer.copy_content", "layer.paste_content", None, "layer.group", "layer.ungroup",
                     "layer.up", "layer.down", None, "layer.mask_white", "layer.mask_black", "layer.mask_remove",
@@ -2769,6 +2932,8 @@ class App:
             gs = imgui.calc_text_size(g)
             dl.add_text(V2(x + (ts - gs.x) / 2, y + (ts - gs.y) / 2), col32(*PAINT_COL), g)
         dl.add_rect(a, b, col32(0, 0, 0, 0.6), 3)
+        dl.add_line(V2(x, y + ts + 1), V2(x + ts, y + ts + 1),
+                    col32(.85, .25, .23) if lay.effects else col32(.4, .4, .4), 2)
 
     def _mask_thumb(self, dl, lay, x, y, ts):
         a, b = V2(x, y), V2(x + ts, y + ts)
@@ -2785,21 +2950,21 @@ class App:
             dl.add_rect_filled(a, b, col32(0.1, 0.1, 0.1, 0.6))
             dl.add_line(a, b, col32(0.95, 0.35, 0.3), 2)
         dl.add_rect(a, b, col32(0, 0, 0, 0.6), 3)
+        dl.add_line(V2(x, y + ts + 1), V2(x + ts, y + ts + 1),
+                    col32(.85, .25, .23) if lay.mask_effects else col32(.4, .4, .4), 2)
 
     # --- Properties -----------------------------------------------------------
     def properties_panel(self):
+        if self.workspace_mode == "bake":
+            self.bake_ui.workspace()
+            return
         eng, b = self.engine, self.engine.brush
         lay = eng.layer
         s = self.ui_scale
-        # breadcrumb: where am I editing?
-        if lay is None:
-            crumb = f"{eng.mesh.name}  >  Brush"
-        else:
-            part = "Mask" if b.target == 1 else ("Paint" if lay.kind == "paint" else "Fill")
-            if b.target == 1 and eng.active_mask_paint() is not None:
-                part += " > " + eng.active_mask_paint().name
-            crumb = f"{eng.mesh.name}  >  {lay.name}  >  {part}"
+        crumb = self._editing_context()
         imgui.text_disabled(_ellipsize(crumb, imgui.get_content_region_avail().x))
+        _tip(crumb)
+        imgui.text_wrapped("Writes: " + self._writing_channels())
         n_sel = len(self.sel_uids)
         if n_sel > 1:
             imgui.text_colored(V4(*ACCENT, 1), f"{n_sel} layers selected: layer settings apply to all")
@@ -3370,6 +3535,9 @@ class App:
         dl.pop_clip_rect()
 
     def viewport_overlay(self, vp):
+        # Foreground guides must not draw over modal dialogs or quick-property popups.
+        if imgui.is_popup_open("", imgui.PopupFlags_.any_popup_id | imgui.PopupFlags_.any_popup_level):
+            return
         s = self.ui_scale
         x, y, w, h = vp
         eng, r, b = self.engine, self.engine.renderer, self.engine.brush
@@ -3390,6 +3558,10 @@ class App:
         imgui.push_style_var(imgui.StyleVar_.window_rounding, 4 * s)
         imgui.begin("##vp_overlay", None, flags)
         imgui.pop_style_var()
+        mode = 1 if self.workspace_mode == "bake" else 0
+        chosen = self._seg("workspace_mode", ["Painting", "Baking"], mode, ["Painting (F9)", "Baking (F8)"])
+        if chosen != mode:
+            self._set_workspace_mode("bake" if chosen else "paint")
         imgui.set_next_item_width(150 * s)
         ch, v = imgui.combo("##disp", r.mode, DISPLAY_MODES)
         if ch:
@@ -3426,6 +3598,8 @@ class App:
             chips.append(f"Lazy {b.lazy:.0f} px (D)")
         if self._resume:
             chips.append("Next stroke resumes the last one (A)")
+        imgui.text_disabled(_ellipsize(self._editing_context(), 440 * s))
+        _tip(self._editing_context() + "\nWrites: " + self._writing_channels())
         if chips:
             imgui.text_colored(V4(*ACCENT, 1), "   ".join(chips))
         why = self._paint_block_reason(uv=self.view_mode == VIEW_2D or self._over(self.uv_rect), polygon=self.poly_fill)
@@ -3444,7 +3618,7 @@ class App:
             label = f"2D  |  {DISPLAY_MODES[r.mode]}" + ("  |  tile preview up to 512 px" if tiled else "")
             fg.add_text(V2(ux + 10 * s, uy + uh - 42 * s), col32(*TEXT_DIM), label)
             fg.add_text(V2(ux + 10 * s, uy + uh - 23 * s), col32(*TEXT_DIM),
-                        "Left: paint across tiles   Middle: pan   Wheel: zoom" if tiled else "Left: paint   Middle: pan   Wheel: zoom")
+                        "Left: paint   Alt+Left: rotate   Alt+Middle: pan   Alt+Right: zoom")
             if tiled:
                 _, mapping = self._uv_input()
                 sx, sy = self.fb_scale
@@ -3491,6 +3665,20 @@ class App:
             return "A folder is selected: select a paint layer inside it, or paint the folder's mask."
         if not lay.visible:
             return "The selected layer is hidden: show it (eye icon) to paint."
+        parent = eng.find(lay)[2]
+        while parent is not None:
+            if not parent.visible:
+                return "The selected layer's folder is hidden: show the folder to paint."
+            parent = eng.find(parent)[2]
+        if self.workspace_mode == "bake" and lay.pid not in (
+                eng.ts.bake_settings.ray_correction_pid, eng.ts.bake_settings.distance_correction_pid):
+            return "Baking mode: select a correction field in Properties, or press F9 to paint materials."
+        if not eng.ts.visible:
+            return "The active texture set is hidden: show it in Texture Set List to paint."
+        if b.target == 1 and not lay.mask_enabled:
+            return "The selected mask is disabled: Shift+click its thumbnail to enable it."
+        if b.target == 0 and not b.user_channel and not any(b.enabled):
+            return "No paint channels enabled: enable material channels in Properties."
         if b.target == 0 and lay.kind != "paint":
             return "Fill layer selected: paint its mask (mask thumbnail) or add a paint layer."
         if not self.poly_fill and b.tool == TOOL_CLONE and eng.clone_source is None and not (self._over(self.uv_rect) or self.view_mode == VIEW_2D):
@@ -3508,9 +3696,8 @@ class App:
         right = ""
         eng = self.engine
         if eng.comp is not None:
-            lay = eng.layer
-            tgt = "-" if lay is None else f"{lay.name} > {'Mask' if eng.brush.target else 'Content'}"
-            right = f"Painting: {tgt}     {eng.res} px     {self.fps:4.0f} fps"
+            right = f"{self._tool_label()[1]}: {self._editing_context()}     {eng.res} px     {self.fps:4.0f} fps"
+            right = _ellipsize(right, max(ww * .58, 1))
         rw = imgui.calc_text_size(right).x
         text = self.status if recent and self.status else tip
         if recent and self.status:
@@ -3577,6 +3764,39 @@ class App:
         view, mapping = self._uv_input()
         return mapping.uv(view.pixel(imgui.get_io().mouse_pos))
 
+    def _uv_target_key(self):
+        e = self.engine
+        effect = e.active_mask_paint()
+        return (id(e.mesh), e.ts.pid, e.layer.pid if e.layer else None,
+                e.brush.target, effect.pid if effect else None, e.brush.user_channel)
+
+    def _uv_straight_line(self, snap=False):
+        e = self.engine
+        if self._last_uv_hit is None or self._last_uv_hit[0] != self._uv_target_key():
+            self.msg("Paint a UV stroke on this target before drawing a straight line.")
+            return
+        reason = self._paint_block_reason(uv=True) or e.uv_tool_reason()
+        if reason or self.poly_fill:
+            self.msg(reason or "Choose Paint for a UV straight line.")
+            return
+        _, mapping = self._uv_input()
+        start, end = np.asarray(self._last_uv_hit[1]), self._mouse_uv()
+        if snap:
+            a, b = mapping.pixel(start), mapping.pixel(end)
+            delta = b - a
+            angle = round(math.atan2(delta[1], delta[0]) / (math.pi / 12)) * math.pi / 12
+            end = mapping.uv(a + np.linalg.norm(delta) * np.array((math.cos(angle), math.sin(angle))))
+        if e.pick_uv(end) is None:
+            return
+        try:
+            if e.begin_uv_stroke(start, mapping, pressure=self.tablet.pressure):
+                e.stroke_uv_to(end, pressure=self.tablet.pressure, mapping=mapping)
+                e.end_stroke()
+                self._last_uv_hit = (self._uv_target_key(), tuple(end))
+        except (ValueError, OSError) as error:
+            e.cancel_stroke()
+            self.msg("UV line failed: " + str(error))
+
     def _begin_uv_paint(self):
         e = self.engine
         why = self._paint_block_reason(uv=True) or e.uv_tool_reason()
@@ -3589,8 +3809,16 @@ class App:
             e.clone_uv_offset = None
         _, mapping = self._uv_input()
         try:
-            if e.begin_uv_stroke(self._mouse_uv(), mapping, pressure=self.tablet.pressure):
+            uv = self._mouse_uv()
+            previous = self._last_uv_hit
+            resume = self._resume and previous is not None and previous[0] == self._uv_target_key()
+            start = previous[1] if resume else uv
+            if e.begin_uv_stroke(start, mapping, pressure=self.tablet.pressure):
+                if resume:
+                    e.stroke_uv_to(uv, pressure=self.tablet.pressure, mapping=mapping)
+                self._resume = False
                 self.drag = "uvpaint"
+                self._last_uv_hit = (self._uv_target_key(), tuple(uv))
         except (ValueError, OSError) as error:
             e.cancel_stroke()
             self.drag = None
@@ -3602,6 +3830,8 @@ class App:
         _, mapping = self._uv_input()
         try:
             self.engine.stroke_uv_to(uv, pressure=self.tablet.pressure, mapping=mapping)
+            if self.engine.pick_uv(uv) is not None:
+                self._last_uv_hit = (self._uv_target_key(), tuple(uv))
         except (ValueError, OSError) as error:
             self.engine.cancel_stroke()
             self.drag = None
@@ -3733,7 +3963,10 @@ class App:
     def _pick_cursor(self):
         if not (self._over_viewport() or self.drag == "paint"):
             return None
-        return self.engine.pick(*self._mouse_vp())
+        hit = self.engine.pick(*self._mouse_vp())
+        if hit is not None and self.engine._set_of_tri(self.engine._last_pick["tri"]) != self.engine.active:
+            return None
+        return hit
 
     def _cursor_visible(self):
         return (self.cursor is not None and not imgui.get_io().key_alt and self._gizmo_hover_axis is None
@@ -3759,6 +3992,9 @@ class App:
             return
         hit = eng.pick(*self._mouse_vp())
         if hit is None:
+            return
+        if eng._set_of_tri(eng._last_pick["tri"]) != eng.active:
+            self.msg("This surface belongs to another texture set. Ctrl+Alt+Right click selects it.")
             return
         if b.tool == TOOL_CLONE and self.clone_absolute:
             eng.clone_offset = None            # absolute source: every stroke starts at the source
@@ -3917,6 +4153,11 @@ class App:
     def viewport_input(self):
         io = imgui.get_io()
         eng, b = self.engine, self.engine.brush
+        if io.want_text_input or imgui.is_popup_open("", imgui.PopupFlags_.any_popup_id):
+            if self.drag in ("paint", "uvpaint"):
+                eng.end_stroke()
+            self.drag = None
+            return
         if getattr(eng, "_tile_stroke", None) is not None and imgui.is_key_pressed(imgui.Key.escape):
             eng.cancel_stroke()
             self.drag = None
@@ -3998,29 +4239,53 @@ class App:
                     kind = "st_rot" if imgui.is_mouse_clicked(0) else ("st_zoom" if imgui.is_mouse_clicked(1) else "st_move")
                     self._image_view = "uv"
                     self.drag, self.drag_start = kind, (mx, my, list(self._xform()))
+                elif imgui.is_mouse_clicked(0) and alt and not ctrl:
+                    view, mapping = self._uv_input()
+                    pixel = view.pixel((mx, my))
+                    self.drag = "uvrotate"
+                    self.drag_start = (mx, my, self.uv.rotation, mapping.uv(pixel), pixel, view.size, shift)
+                elif imgui.is_mouse_clicked(0) and alt and ctrl:
+                    self.drag, self.drag_start = "uvpan", 0
                 elif imgui.is_mouse_clicked(0) and not alt:
                     if v_held:
                         self.msg("UV clone source set." if eng.set_uv_clone_source(self._mouse_uv()) else "Choose a UV island for the clone source.")
+                    elif shift:
+                        self._uv_straight_line(snap=ctrl)
                     elif ctrl:
                         self.drag, self.drag_start = "flow", (mx, my, b.flow, b.angle)
-                    elif shift:
-                        self.msg("Straight-line/resume shortcuts currently use the 3D view; drag to paint in 2D.")
                     else:
                         self._begin_uv_paint()
-                elif any(imgui.is_mouse_clicked(k) for k in (0, 1, 2)):
-                    self.drag = "uvpan"
+                elif imgui.is_mouse_clicked(1):
+                    if alt:
+                        view, mapping = self._uv_input()
+                        pixel = view.pixel((mx, my))
+                        self.drag, self.drag_start = "uvzoom", (mx, my, self.uv.zoom, mapping.uv(pixel), pixel, view.size, False)
+                    elif ctrl:
+                        self.drag, self.drag_start = "size", (mx, my, self.bsize.value, b.hardness, self._size_units_per_px())
+                    elif shift:
+                        self.drag = "light"
+                    else:
+                        self.drag, self.drag_start = "uvrmb", (mx, my)
+                elif imgui.is_mouse_clicked(2):
+                    self.drag, self.drag_start = "uvpan", 2
                 if io.mouse_wheel:
-                    self.uv.zoom_by(io.mouse_wheel)
+                    if ctrl:
+                        self.bsize.scale(1.1 ** io.mouse_wheel)
+                    else:
+                        view, mapping = self._uv_input()
+                        pixel = view.pixel((mx, my))
+                        self.uv.zoom_by(io.mouse_wheel)
+                        self.uv.anchor(mapping.uv(pixel), pixel, view.size)
         if self.drag:
             d = self.drag
-            if d in ("paint", "uvpaint", "flow", "snaporbit", "pan_l", "st_rot", "split"):
+            if d in ("paint", "uvpaint", "flow", "snaporbit", "pan_l", "st_rot", "split", "uvrotate"):
                 held = imgui.is_mouse_down(0)
             elif d == "orbit":
                 held = imgui.is_mouse_down(0) or imgui.is_mouse_down(1)
-            elif d in ("zoom", "size", "light", "rmb", "st_zoom"):
+            elif d in ("zoom", "size", "light", "rmb", "st_zoom", "uvzoom", "uvrmb", "uvpan_r"):
                 held = imgui.is_mouse_down(1)
             elif d == "uvpan":
-                held = any(imgui.is_mouse_down(k) for k in (0, 1, 2))
+                held = imgui.is_mouse_down(self.drag_start)
             else:
                 held = imgui.is_mouse_down(2)
             dx, dy = io.mouse_delta
@@ -4068,6 +4333,20 @@ class App:
                     self.drag = "orbit"          # right drag still orbits
             elif d == "uvpan":
                 self.uv.pan(dx, dy, self.uv_rect[2], self.uv_rect[3])
+            elif d == "uvpan_r":
+                self.uv.pan(dx, dy, self.uv_rect[2], self.uv_rect[3])
+            elif d in ("uvrotate", "uvzoom"):
+                x0, y0, original, anchor, pixel, size, snap = self.drag_start
+                if d == "uvrotate":
+                    angle = original + (mx - x0) * .008
+                    self.uv.rotation = round(angle / (math.pi / 2)) * (math.pi / 2) if shift or snap else angle
+                else:
+                    self.uv.zoom = float(np.clip(original * math.exp((my - y0) * .03), self.uv.min_zoom, 32.))
+                self.uv.anchor(anchor, pixel, size)
+            elif d == "uvrmb":
+                x0, y0 = self.drag_start
+                if abs(mx - x0) + abs(my - y0) > 4:
+                    self.drag = "uvpan_r"
             if not held:
                 if d in ("paint", "uvpaint"):
                     if d == "uvpaint":
@@ -4075,7 +4354,7 @@ class App:
                     eng.end_stroke()
                 if d in ("st_rot", "st_move", "st_zoom"):
                     self._image_view = None
-                if d == "rmb":
+                if d in ("rmb", "uvrmb"):
                     self.quick_open = True
                 if d == "split":
                     self._save_settings()
@@ -4450,10 +4729,37 @@ class App:
             imgui.end_popup()
 
         imgui.set_next_window_pos(center, imgui.Cond_.appearing, V2(0.5, 0.5))
+        imgui.set_next_window_pos(center, imgui.Cond_.always, V2(.5, .5))
+        screen = imgui.get_main_viewport().size
+        imgui.set_next_window_size_constraints(V2(240, 0), V2(max(screen.x - 24, 240), max(screen.y - 24, 240)))
         if imgui.begin_popup_modal("Export Textures", None, auto)[0]:
-            imgui.begin_child("##export-options", V2(660 * s, 310 * s), imgui.ChildFlags_.borders)
-            self._export_options()
-            imgui.end_child()
+            screen = imgui.get_main_viewport().size
+            export_width = min(880 * s, max(screen.x - 80 * s, 220))
+            body_budget = max(screen.y - 220 * s, 160)
+            options_height = min(390 * s, body_budget * .65)
+            preview_height = min(150 * s, body_budget * .22)
+            if imgui.begin_tab_bar("##export-tabs"):
+                if imgui.begin_tab_item("Export settings")[0]:
+                    imgui.begin_child("##export-options", V2(export_width, options_height), imgui.ChildFlags_.borders)
+                    self._export_options()
+                    imgui.end_child()
+                    imgui.end_tab_item()
+                if imgui.begin_tab_item("Output templates")[0]:
+                    imgui.begin_child("##visual-template", V2(export_width, options_height), imgui.ChildFlags_.borders)
+                    self.export_ui.draw()
+                    imgui.end_child()
+                    imgui.end_tab_item()
+                flags = imgui.TabItemFlags_.set_selected if self.export_results_requested else 0
+                if imgui.begin_tab_item("List of exports", None, flags)[0]:
+                    self.export_results_requested = False
+                    imgui.begin_child("##export-results", V2(export_width, options_height), imgui.ChildFlags_.borders)
+                    for result in self.export_results:
+                        imgui.text_wrapped(result)
+                    if not self.export_results:
+                        imgui.text_disabled("No textures exported in this session.")
+                    imgui.end_child()
+                    imgui.end_tab_item()
+                imgui.end_tab_bar()
             manifest, problem = None, None
             try:
                 manifest = self._export_manifest()
@@ -4461,7 +4767,7 @@ class App:
                 problem = str(ex)
             imgui.spacing()
             imgui.text("Files that will be written")
-            imgui.begin_child("##export-preview", V2(660 * s, 150 * s), imgui.ChildFlags_.borders)
+            imgui.begin_child("##export-preview", V2(export_width, preview_height), imgui.ChildFlags_.borders)
             if manifest and imgui.begin_table("##files", 2, imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_outer):
                 for fn, what in self._export_files(manifest):
                     imgui.table_next_row()
@@ -4477,14 +4783,24 @@ class App:
             imgui.begin_disabled(manifest is None)
             if imgui.button("Export", V2(120 * s, 0)):
                 try:
+                    settings = self.export_ui.snapshot()
                     files = texture_exporter.write_export_manifest(self.engine, manifest)
+                    self._edit_properties("Save export settings", [(self.engine, {"export_settings": settings})])
+                    self.export_results = ["Written: " + str(path) for path in files]
+                    self.export_results_requested = True
                     self.msg(f"Exported {len(files)} maps to {self.export_dir}")
                     if self.export_open_folder and sys.platform == "win32":
                         os.startfile(self.export_dir)  # noqa
-                    imgui.close_current_popup()
                 except Exception as e:
                     traceback.print_exc()
+                    self.export_results = ["Export failed: " + str(e)]
+                    self.export_results_requested = True
                     self.msg(f"Export failed: {e}")
+            imgui.end_disabled()
+            imgui.same_line()
+            imgui.begin_disabled(manifest is None)
+            if imgui.button("Save settings"):
+                self.export_ui.save_settings()
             imgui.end_disabled()
             imgui.same_line()
             if imgui.button("Cancel", V2(120 * s, 0)) or imgui.is_key_pressed(imgui.Key.escape):

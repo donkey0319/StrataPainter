@@ -242,7 +242,9 @@ The layout follows Substance 3D Painter's default workspace, so Painter users fi
 - **Assets** (left): smart materials, materials and mask generators with search and a thumbnail-size slider.
   Double-click, or drag onto the Layer Stack. Clicking a material sets the brush (or the selected fill layer).
 - **Viewport** (centre): display channel and 3D / 3D+2D / 2D switch in the top-left corner. The 2D view shows
-  the texture set in UV space (view only).
+  and paints the active texture set in UV space, with rotation/pan/zoom matching the Alt+mouse profile.
+  New workspaces default to split 3D/2D. **Mode > Baking (F8)** exposes nonmodal bake controls in Properties;
+  **F9** returns to Painting.
 - **Right column**: Texture Set List, then **Layer Stack** (tabbed with Texture Set Settings), then **Properties**.
   Each layer row has visibility, content and mask thumbnails (click the mask thumbnail to paint the mask),
   name (double-click to rename), and blend/opacity (click to change). Drag rows to reorder; Ctrl/Shift-click
@@ -292,8 +294,12 @@ Strata uses Substance 3D Painter's default shortcuts. Everything is listed (and 
 | Export textures | Ctrl+Shift+E |
 | Command search | Ctrl+K |
 
-Painter shortcuts for features Strata doesn't have yet (the transform manipulator Q/W/E/R/T, Iray F10,
+W/E/R activate native fill projection translation/rotation/scale; Q shows or finishes that editing mode.
+Painter shortcuts for features Strata doesn't have yet (general manipulator space/size controls, Iray F10,
 particles Ctrl+1/2/3 and Space, Alt+H) are reserved: pressing them says why nothing happened.
+
+The [Painter UX implementation guide](docs/PAINTER_UX_IMPLEMENTATION.md) records the compatible
+interactions, visual export editor, saved export configuration and remaining parity requirements.
 
 Every shortcut can be changed in Window > Shortcuts (click the shortcut, press the new keys).
 
