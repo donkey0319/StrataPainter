@@ -42,7 +42,7 @@ class EffectsUI:
                                           ("Move down", lambda: engine.move_effect(effect, -1, layer)),
                                           ("Duplicate", lambda: engine.copy_effect(effect, layer)),
                                           ("Delete effect", lambda: engine.remove_effect(effect, layer))):
-                        if imgui.menu_item(label)[0]:
+                        if imgui.menu_item(label, "", False)[0]:
                             app._finish_property_edit()
                             action()
                     imgui.end_popup()

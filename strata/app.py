@@ -2570,7 +2570,7 @@ class App:
                     eng.set_active(i)
                     self.isolate = not self.isolate
                 for text, value in (("Show all texture sets", True), ("Hide all texture sets", False)):
-                    if imgui.menu_item(text)[0]:
+                    if imgui.menu_item(text, "", False)[0]:
                         for item in eng.sets:
                             item.visible = value
                         self.isolate = False
@@ -2897,7 +2897,7 @@ class App:
         if imgui.begin_menu("Add effect"):
             mask = self.engine.brush.target == 1
             for kind in (MASK_EFFECTS if mask else CONTENT_EFFECTS):
-                if imgui.menu_item(kind.replace("_", " ").title())[0]:
+                if imgui.menu_item(kind.replace("_", " ").title(), "", False)[0]:
                     effect = self.engine.add_effect(kind, layer=lay, mask=mask)
                     self.effects_ui.selected[(lay.pid, mask)] = effect.pid
                     self.prop_filter = "Mask effects" if mask else "Content effects"
