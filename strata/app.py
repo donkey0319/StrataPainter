@@ -54,6 +54,7 @@ from .ui.theme import (ACCENT, FILL_COL, ICON, PAINT_COL, SEL_BG, SEL_BG_HI, SEL
                        WARN_COL, apply_theme,
                        col32, load_fonts)
 from .ui.uvview import UVView
+from .ui.brushpreview import BrushPreview
 from .ui.project import ProjectUI
 from .ui.material import MaterialUI
 from .ui.effects import EffectsUI
@@ -1371,6 +1372,8 @@ class App:
             pass
         if hasattr(self, "material_previews"):
             self.material_previews.release()
+        if hasattr(self, "brush_preview"):
+            self.brush_preview.release(self.engine.painter)
         self.tablet.close()
         glfw.terminate()
 
@@ -3031,6 +3034,8 @@ class App:
                 ch, v = imgui.combo("##tool", cur, [f"{n}   ({self.reg.shortcut(c)})" for n, c in tools])
                 if ch:
                     self.reg.run(tools[v][1], self.msg)
+            if not self.poly_fill:
+                self._draw_brush_preview()
             if self.poly_fill:
                 if self._row("Fill mode", "What one click fills"):
                     _, self.fill_mode = imgui.combo("##fillmode", self.fill_mode, FILL_MODES)
@@ -3166,6 +3171,22 @@ class App:
         if self._row("Tablet input"):
             imgui.text_wrapped(self.tablet.status)
             imgui.text_disabled(f"{self.tablet.source}: {self.tablet.pressure:.2f}")
+
+    def _draw_brush_preview(self):
+        if not hasattr(self, "brush_preview"):
+            self.brush_preview = BrushPreview()
+        try:
+            texture = self.brush_preview.update(self.engine)
+        except (OSError, ValueError, MemoryError) as error:
+            imgui.text_disabled("Brush preview unavailable")
+            _tip(str(error))
+            return
+        width = max(1, min(imgui.get_content_region_avail().x, self.brush_preview.SIZE * self.ui_scale))
+        crop = self.brush_preview.CROP
+        imgui.image(imgui.ImTextureRef(texture.glo), V2(width, width * (1 - 2 * crop)),
+                    V2(0, 1 - crop), V2(1, crop))
+        _tip("Brush tip and sample stroke on a flat surface, with rising pressure. "
+             "Preview size is fitted to this panel.")
 
     def _props_brush_material(self):
         b = self.engine.brush
