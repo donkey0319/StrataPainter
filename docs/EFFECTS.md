@@ -62,3 +62,46 @@ Validation: `tests/effects_check.py --gpu OUT` covers ordering, independent stro
 undo, copies, archives, libraries and storage ownership. `tests/effects_ui_check.py OUT`
 exercises all editors, real controls and viewport picking. Qualification results
 and remaining work are recorded in IMPLEMENTATION_STATUS.md.
+
+## Linked wear and painted chip relief
+
+Add a **mask_anchor** row in Mask effects after the painted mask you want to
+publish. Enter its name in **Mask anchor**. The row captures the scalar mask at
+that position. Filters after it can change the source layer's coverage while
+upper layers keep reading the earlier capture. On each upper layer, add an
+**anchor** mask effect and choose that definition in **Anchor source**. Source
+channel selection applies to content anchors. A mask anchor always returns its
+scalar capture. References use persistent IDs and support renaming, copies,
+undo and portable reopen.
+
+The capture precedes the layer's geometry restriction and authored-object
+coverage. Disabled masks, rows and layers produce no capture. References require
+a source on an earlier evaluated layer in the same texture set. Missing,
+forward and cyclic sources retain the existing black fallback and diagnostics.
+Existing content anchors continue to capture accumulated material output.
+
+Add **bevel** after a mask reference to turn its binary boundary into a smooth
+distance ramp. **Bevel radius** is 0–32 texture pixels, with zero preserving the
+input. Put this mask on a Height-only fill to create chip relief, and reuse the
+original capture for the primer and paint coverage. Blend, opacity and bypass
+apply to the filter. The native implementation samples eight directions around
+the thresholded mask and smooths the signed distance. Fine corners are an
+approximation and the operation does not claim Adobe Bevel Smooth pixel parity.
+
+For wear around stamped normal details, add a content **anchor** to the lower
+normal-detail layer. Add a **generator** mask effect above it, enable
+**Use normal anchor**, choose the content anchor and edit **Micro normal
+strength**. The generator adds the local divergence of the encoded tangent
+normal vectors to baked curvature before evaluating its ordinary controls.
+Edge Wear, Dirt and Cavity consume this curvature. Other generator types retain
+their existing inputs. A missing or disabled normal source contributes no added
+curvature. A mask capture cannot serve as a vector normal source.
+
+Mask anchors, bevel filters and active micro-normal generator inputs require
+project **v15**. Older projects retain their existing version selection. These
+filters operate in the active texture tile, with texture-pixel radius and local
+normal differences. Cross-tile and UV-seam neighborhoods are not stitched.
+
+Local qualification is recorded in IMPLEMENTATION_STATUS.md. The complete
+material workflow and existing feature mappings are in
+[the helmet tutorial reference](HELMET_TEXTURING_TUTORIAL.md).

@@ -92,10 +92,12 @@ class Projection:
 
 # effect kinds: mask-side and content-side
 MASK_EFFECTS = ["fill", "generator", "levels", "invert", "blur", "color_select", "anchor",
-                "mesh_map", "threshold", "paint", "graph"]
+                "mesh_map", "threshold", "paint", "graph", "mask_anchor", "bevel"]
 CONTENT_EFFECTS = ["hsl", "levels", "invert", "blur", "brightness_contrast", "anchor", "graph"]
 
 EFFECT_DEFAULTS = {
+    "mask_anchor": {"name": "Mask anchor"},
+    "bevel":      {"radius": 4.0},
     "paint":      {"initial": 0.0},
     "fill":       {"value": 1.0, "map": None, "proj": None},
     "generator":  {"gen": None},
@@ -313,13 +315,13 @@ def bind_anchor_references(layers):
     ordered = list(_evaluation_layers(layers))
     definitions, names, diagnostics = {}, {}, []
     for index, layer in enumerate(ordered):
-        for effect in layer.effects:
-            if effect.kind == "anchor" and effect.params.get("name"):
+        for effect in layer.effects + [e for e in layer.mask_effects if e.kind == "mask_anchor"]:
+            if effect.kind in ("anchor", "mask_anchor") and effect.params.get("name"):
                 definitions.setdefault(effect.pid, (index, effect))
                 names.setdefault(effect.params["name"], []).append(effect.pid)
     for index, layer in enumerate(ordered):
         for effect in layer.mask_effects:
-            if effect.kind != "anchor":
+            if effect.kind != "anchor" and not (effect.kind == "generator" and effect.params.get("micro_normal")):
                 continue
             source = effect.params.get("source_pid")
             label = effect.params.get("source") or effect.params.get("name") or "(unnamed)"
@@ -333,6 +335,8 @@ def bind_anchor_references(layers):
             definition = definitions.get(source)
             if definition is None:
                 diagnostics.append(f"Anchor {label!r}: missing source {source}")
+            elif effect.kind == "generator" and definition[1].kind != "anchor":
+                diagnostics.append(f"Anchor {label!r}: micro normals require a content anchor")
             elif definition[0] >= index:
                 diagnostics.append(f"Anchor {label!r}: forward or cyclic source")
     return diagnostics

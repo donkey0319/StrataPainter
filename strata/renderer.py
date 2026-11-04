@@ -13,7 +13,8 @@ from .mathutil import look_at, perspective, glmat, normalize
 DISPLAY_MODES = ["Material", "Base Color", "Roughness", "Metallic", "Height", "Normal",
                  "Layer Mask", "Ambient Occlusion", "Curvature", "UV Checker",
                  "Emissive", "Opacity", "Thickness", "ID", "World Space Normal", "Position",
-                 "Baked Tangent Normal", "Baked Height", "Shaded World Normal", "User Channel", "Specular F0", "Shader Roughness", "Clearcoat"]
+                 "Baked Tangent Normal", "Baked Height", "Shaded World Normal", "User Channel", "Specular F0", "Shader Roughness", "Clearcoat",
+                 "Albedo validation"]
 VIEW_MODES = ["3D", "2D", "3D + 2D"]
 
 
@@ -110,6 +111,7 @@ class Renderer:
         self.exposure = 1.0
         self.use_ao = True
         self.mode = 0
+        self.albedo_threshold = 50.0
         self.emissive_intensity = 1.0
         self.alpha_test = False
         self.env_tex = None
@@ -281,6 +283,8 @@ class Renderer:
         s["u_vp"].write(glmat(vp))
         g.set(s, "u_campos", tuple(map(float, cam.eye)))
         g.set(s, "u_mode", int(self.mode))
+        g.set(s, "u_albedoThreshold", float(self.albedo_threshold) / 255.0)
+        g.set(s, "u_linearAlbedo", int(self.pipeline is not None and self.pipeline.managed))
         g.set(s, "u_exposure", float(self.exposure))
         g.set(s, "u_envRot", float(self.env_rot))
         g.set(s, "u_useAO", int(self.use_ao))

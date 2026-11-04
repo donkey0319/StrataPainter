@@ -51,11 +51,11 @@ class EffectsUI:
             imgui.pop_id()
             imgui.unindent(32 * app.ui_scale)
 
-    def param(self, effect, key, label, kind="slider", lo=0., hi=1., choices=None):
+    def param(self, effect, key, label, kind="slider", lo=0., hi=1., choices=None, default=None):
         app = self.app
         if not app._row(label):
             return
-        value = effect.params.get(key, lo)
+        value = effect.params.get(key, lo if default is None else default)
         if choices is not None:
             changed, value = imgui.combo("##" + label, int(value), choices)
         elif kind == "text":
@@ -86,6 +86,7 @@ class EffectsUI:
                    "Mask offset", "Mask rotation", "Mask axis", "Mask sharpness", "ID tolerance", "ID hardness",
                    "ID colors", "Effect channel", "Color target", "Input low", "Input high", "Output low", "Output high",
                    "Blur radius", "Threshold softness", "Hue", "Saturation", "Lightness", "Brightness", "Contrast", "Mesh map"]
+        labels += ["Mask anchor", "Bevel radius", "Micro normal", "Micro normal strength"]
         if not app._section(title, labels):
             return
         imgui.push_id(title + layer.pid)
@@ -95,7 +96,7 @@ class EffectsUI:
             if imgui.button("Add##" + title):
                 app._finish_property_edit()
                 kind = kinds[self.add_kind[mask]]
-                params = {"name": "Anchor " + str(len(layer.effects) + 1)} if kind == "anchor" and not mask else {}
+                params = {"name": "Anchor " + str(len(stack) + 1)} if kind == "mask_anchor" or (kind == "anchor" and not mask) else {}
                 effect = engine.add_effect(kind, layer=layer, mask=mask, **params)
                 self.selected[(layer.pid, mask)] = effect.pid
         for index, effect in enumerate(list(stack)):
@@ -145,7 +146,7 @@ class EffectsUI:
         if app._row("Effect name"):
             changed, value = imgui.input_text("##effect_name", effect.name)
             app._edit_value("Effect name", effect, "name", value, changed, continuous=True)
-        if not (effect.kind == "anchor" and not mask):
+        if not (effect.kind == "mask_anchor" or (effect.kind == "anchor" and not mask)):
             # Scalar mask effects have no color/HSL or encoded-normal blend semantics.
             channel = effect.params.get("channel", 0)
             modes = (list(range(24)) if mask or channel in (1, 2, 3, 6) else
@@ -167,18 +168,12 @@ class EffectsUI:
                     if imgui.button(name):
                         engine.fill_paint_effect(effect, value)
                 imgui.text_wrapped("Rows evaluate top to bottom. This row owns its paint; place filters before or after it.")
+        elif kind == "mask_anchor":
+            self.param(effect, "name", "Mask anchor", "text")
+            imgui.text_wrapped("Captures the mask at this row, before subsequent filters and geometry restrictions.")
         elif kind == "anchor":
             if mask:
-                if app._row("Anchor source"):
-                    sources = [(lay, e) for lay in engine.all_layers() for e in lay.effects
-                               if e.kind == "anchor" and e.params.get("name")]
-                    current = effect.params.get("source_pid")
-                    preview = next((e.params["name"] for _, e in sources if e.pid == current), "Missing / choose source")
-                    if imgui.begin_combo("##anchor_source", preview):
-                        for lay, source in sources:
-                            if imgui.selectable(f"{lay.name}: {source.params['name']}##{source.pid}", source.pid == current)[0]:
-                                self.set_params(effect, source_pid=source.pid, source=source.params["name"])
-                        imgui.end_combo()
+                self.anchor_source(effect)
                 self.param(effect, "channel", "Source channel", choices=[d.value_label for d in CHANNEL_DESCRIPTORS])
             else:
                 self.param(effect, "name", "Anchor name", "text")
@@ -192,6 +187,13 @@ class EffectsUI:
                 app.p_slider(label, gen, attr, lo, hi, dirty=True)
             app.p_combo("Generator axis", gen, "axis", ["X", "Y", "Z"])
             app.p_check("Invert generator", gen, "invert")
+            if app._row("Micro normal"):
+                changed, enabled = imgui.checkbox("Use normal anchor", bool(effect.params.get("micro_normal")))
+                if changed:
+                    self.set_params(effect, micro_normal=enabled)
+            if effect.params.get("micro_normal"):
+                self.anchor_source(effect, normal=True)
+                self.param(effect, "micro_strength", "Micro normal strength", lo=0, hi=16, default=1.0)
         elif kind == "fill":
             self.param(effect, "value", "Fill value")
             if app._row("Mask bitmap"):
@@ -249,6 +251,7 @@ class EffectsUI:
                 "levels": [("in_lo", "Input low", 0, 1), ("in_hi", "Input high", 0, 1),
                            ("gamma", "Gamma", .01, 5), ("out_lo", "Output low", 0, 1), ("out_hi", "Output high", 0, 1)],
                 "blur": [("radius", "Blur radius", 0, 32)],
+                "bevel": [("radius", "Bevel radius", 0, 32)],
                 "threshold": [("level", "Threshold", 0, 1), ("softness", "Threshold softness", .001, .5)],
                 "hsl": [("hue", "Hue", -1, 1), ("saturation", "Saturation", -1, 1), ("lightness", "Lightness", -1, 1)],
                 "brightness_contrast": [("brightness", "Brightness", -1, 1), ("contrast", "Contrast", -1, 1)]}
@@ -257,6 +260,20 @@ class EffectsUI:
                 fields = {"mesh_map": fields["levels"]}
             for key, label, lo, hi in fields.get(kind, []):
                 self.param(effect, key, label, lo=lo, hi=hi)
+
+    def anchor_source(self, effect, normal=False):
+        if not self.app._row("Anchor source"):
+            return
+        sources = [(lay, source) for lay in self.app.engine.all_layers()
+                   for source in lay.effects + ([] if normal else lay.mask_effects)
+                   if source.kind in ("anchor", "mask_anchor") and source.params.get("name")]
+        current = effect.params.get("source_pid")
+        preview = next((source.params["name"] for _, source in sources if source.pid == current), "Missing / choose source")
+        if imgui.begin_combo("##anchor_source", preview):
+            for lay, source in sources:
+                if imgui.selectable(f"{lay.name}: {source.params['name']}##{source.pid}", source.pid == current)[0]:
+                    self.set_params(effect, source_pid=source.pid, source=source.params["name"])
+            imgui.end_combo()
 
     def graph_editor(self, effect, mask):
         import copy

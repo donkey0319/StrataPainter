@@ -22,7 +22,7 @@ from .channels import CHANNEL_DESCRIPTORS, BY_KEY, ACC_DTYPES, ACC_CLEAR
 T_DTYPES = ("f1", "f2", "f1", "f1", "f1")
 CONTENT_KINDS = {"hsl": 1, "levels": 2, "invert": 3, "blur": 4, "brightness_contrast": 5, "graph": 6}
 MASK_KINDS = {"fill": 1, "generator": 2, "levels": 3, "invert": 4, "color_select": 5, "anchor": 6,
-              "mesh_map": 7, "threshold": 8}
+              "mesh_map": 7, "threshold": 8, "bevel": 12}
 DILATE_ITERS = 4
 
 
@@ -55,6 +55,7 @@ class Compositor:
         self.mpfbo = ctx.framebuffer([self.mask_preview])
         self.anchors = {}                                 # effect pid -> current evaluation capture
         self._anchor_storage = {}                        # reusable GPU storage, never read directly
+        self._mask_anchor_storage = {}
         self.anchor_diagnostics = []
         self._anchor_available_before = {}
         self._saves = []                                  # group save sets, one per depth
@@ -157,8 +158,8 @@ class Compositor:
                 if layer.is_group:
                     dependencies(layer.children)
                 self._anchor_available_before.setdefault(id(layer), frozenset(available))
-                available.update(e.pid for e in layer.effects
-                                 if e.kind == "anchor" and e.enabled and e.params.get("name"))
+                available.update(e.pid for e in layer.effects + layer.mask_effects
+                                 if e.kind in ("anchor", "mask_anchor") and e.enabled and e.params.get("name"))
         dependencies(layers)
         live_ids = {e.pid for root in layers for lay in root.walk() for e in lay.effects
                     if e.kind == "anchor"}
@@ -168,8 +169,15 @@ class Compositor:
                 framebuffer.release()
                 for texture in textures:
                     texture.release()
+        live_masks = {e.pid for root in layers for lay in root.walk() for e in lay.mask_effects
+                      if e.kind == "mask_anchor"}
+        for pid in list(self._mask_anchor_storage):
+            if pid not in live_masks:
+                texture, framebuffer = self._mask_anchor_storage.pop(pid)
+                framebuffer.release()
+                texture.release()
         anchored = any(e.kind == "anchor" for root in layers for lay in root.walk()
-                       for e in lay.effects + lay.mask_effects)
+                       for e in lay.effects + lay.mask_effects) or bool(live_masks)
         if anchored:
             # A partial accumulator snapshot does not include dependency captures.
             resume_from = cache_at = None
@@ -455,6 +463,9 @@ class Compositor:
         for e in lay.mask_effects:
             if not e.enabled:
                 continue
+            if e.kind == "mask_anchor":
+                self._capture_mask_anchor(e, self.masks[m])
+                continue
             m = self._mask_effect(lay, e, m)
         if lay.part_mask is not None:
             m = self._part_filter(lay, m)
@@ -487,6 +498,8 @@ class Compositor:
         g.set(p, "u_blend", int(blend))
         g.set(p, "u_opacity", float(opacity))
         g.set(p, "u_hasMap", 0)
+        g.set(p, "u_microNormal", 0)
+        g.set(p, "u_microStrength", 1.0)
         g.set(p, "u_lvIn", (0.0, 1.0, 1.0))
         g.set(p, "u_lvOut", (0.0, 1.0))
         setup(p)
@@ -524,6 +537,8 @@ class Compositor:
                 self._set_proj(p, pr.get("proj") or lay.proj)
             elif kind == "generator":
                 self._set_gen(p, pr["gen"], lay.seed)
+                g.set(p, "u_microNormal", int(pr.get("micro_normal", False)))
+                g.set(p, "u_microStrength", float(pr.get("micro_strength", 1.0)))
             elif kind in ("levels", "mesh_map"):
                 g.set(p, "u_lvIn", (float(pr.get("in_lo", 0)), float(pr.get("in_hi", 1)), float(pr.get("gamma", 1))))
                 g.set(p, "u_lvOut", (float(pr.get("out_lo", 0)), float(pr.get("out_hi", 1))))
@@ -539,7 +554,10 @@ class Compositor:
                 g.set(p, "u_tol", float(pr.get("tolerance", 0.1)))
                 g.set(p, "u_hard", float(pr.get("hardness", 0.8)))
             elif kind == "anchor":
-                g.set(p, "u_comp", self._anchor_comp(int(pr.get("channel", 3))))
+                g.set(p, "u_comp", 0 if pr.get("source_pid") in self._mask_anchor_storage
+                      else self._anchor_comp(int(pr.get("channel", 3))))
+            elif kind == "bevel":
+                g.set(p, "u_bevelRadius", float(pr.get("radius", 4.0)))
             elif kind == "threshold":
                 g.set(p, "u_th", (float(pr.get("level", 0.5)), float(pr.get("softness", 0.02))))
 
@@ -548,17 +566,30 @@ class Compositor:
                 units["u_map"] = (1, self.resources.texture(pr["map"], "gray"))
             except Exception as ex:
                 print(f"[strata] could not load {pr['map']}: {ex}")
-        elif kind == "anchor":
+        elif kind == "anchor" or (kind == "generator" and pr.get("micro_normal")):
             source = pr.get("source_pid")
             allowed = self._anchor_available_before.get(id(lay), ())
             src = self.anchors.get(source) if source in allowed else None
             ch = int(pr.get("channel", 3))
             tex = None
             if src is not None:
-                channel = CHANNEL_DESCRIPTORS[ch] if 0 <= ch < N_CH else BY_KEY["H"]
-                tex = src[0][channel.accumulator_index]
-            units["u_map"] = (1, tex or g.black)
+                if kind == "generator":
+                    tex = src[0][BY_KEY["N"].accumulator_index] if source not in self._mask_anchor_storage else None
+                else:
+                    channel = CHANNEL_DESCRIPTORS[ch] if 0 <= ch < N_CH else BY_KEY["H"]
+                    tex = src[0][channel.accumulator_index]
+            units["u_map"] = (1, tex or (g.flat_normal if kind == "generator" else g.black))
         return self._mask_pass(m, k, units, setup, e.blend, e.opacity)
+
+    def _capture_mask_anchor(self, effect, mask):
+        entry = self._mask_anchor_storage.get(effect.pid)
+        if entry is None:
+            texture = self.gpu.texture((self.res, self.res), 1)
+            entry = self._mask_anchor_storage[effect.pid] = (texture, self.gpu.ctx.framebuffer([texture]))
+        self._use(entry[1])
+        self.gpu.bind(self.p_preview, {"u_src": (0, mask)})
+        self._draw(self.p_preview)
+        self.anchors[effect.pid] = ([entry[0]] * 4, entry[1])
 
     @staticmethod
     def _anchor_comp(ch: int) -> int:
@@ -679,5 +710,7 @@ class Compositor:
         for s, f in self._saves + list(self._anchor_storage.values()) + ([self._cache] if self._cache else []):
             objs += s + [f]
         objs += list(self._luts.values())
+        for texture, framebuffer in self._mask_anchor_storage.values():
+            objs += [framebuffer, texture]
         for o in objs:
             o.release()

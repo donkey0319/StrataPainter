@@ -2690,6 +2690,10 @@ class Engine:
             meta["shader_workflow"] = copy.deepcopy(self.shader_workflow)
         if self.export_settings:
             meta["version"] = 14
+        if any(effect.kind in ("mask_anchor", "bevel") or
+               (effect.kind == "generator" and effect.params.get("micro_normal"))
+               for layer in self.all_layers_all_sets() for effect in layer.mask_effects):
+            meta["version"] = 15
         meta, blobs, records, diagnostics = projectio.package_resources(
             meta, path, portable, self.project_resources, BUILTIN_ALPHAS)
         for sd in meta["sets"]:

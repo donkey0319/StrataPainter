@@ -770,6 +770,8 @@ uniform vec3 u_colors[8];
 uniform int u_nColors;
 uniform float u_tol, u_hard;
 uniform vec2 u_th;                // threshold level, softness
+uniform int u_microNormal;
+uniform float u_microStrength, u_bevelRadius;
 in vec2 v_uv; out vec4 o;
 float lv(float x) {
     x = clamp((x - u_lvIn.x) / max(u_lvIn.y - u_lvIn.x, 1e-5), 0.0, 1.0);
@@ -783,7 +785,20 @@ void main() {
     float v = 0.0;
     bool isOp = false;
     if (u_kind == 1) v = u_hasMap == 1 ? projSample(u_map, v_uv, P, N).r : u_value;
-    else if (u_kind == 2) v = genValue(P, N, texture(u_ao, v_uv).r, texture(u_curv, v_uv).r, texture(u_thick, v_uv).r);
+    else if (u_kind == 2) {
+        float curvature = texture(u_curv, v_uv).r;
+        if (u_microNormal == 1) {
+            vec2 stepUV = 1.0 / vec2(textureSize(u_map, 0));
+            // Encoded tangent normals remain vectors. Their local divergence
+            // adds convex/concave response to the existing baked curvature.
+            float dx = texture(u_map, v_uv + vec2(stepUV.x, 0)).r
+                     - texture(u_map, v_uv - vec2(stepUV.x, 0)).r;
+            float dy = texture(u_map, v_uv + vec2(0, stepUV.y)).g
+                     - texture(u_map, v_uv - vec2(0, stepUV.y)).g;
+            curvature = clamp(curvature + (dx + dy) * u_microStrength, 0.0, 1.0);
+        }
+        v = genValue(P, N, texture(u_ao, v_uv).r, curvature, texture(u_thick, v_uv).r);
+    }
     else if (u_kind == 3) { v = lv(prev); isOp = true; }
     else if (u_kind == 4) { v = 1.0 - prev; isOp = true; }
     else if (u_kind == 5) {
@@ -812,6 +827,30 @@ void main() {
     }
     else if (u_kind == 8) { v = smoothstep(u_th.x - u_th.y, u_th.x + u_th.y + 1e-5, prev); isOp = true; }
     else if (u_kind == 9) { v = texture(u_map, v_uv).r; isOp = true; }
+    else if (u_kind == 12) {
+        // A rounded, symmetric distance ramp around the binary mask boundary.
+        // Radius is in texture pixels. Eight rays bound the sampling cost.
+        float radius = clamp(u_bevelRadius, 0.0, 32.0);
+        bool inside = prev >= 0.5;
+        float distanceToEdge = radius;
+        vec2 texel = 1.0 / vec2(textureSize(u_prev, 0));
+        for (int ray = 0; ray < 8; ray++) {
+            float angle = float(ray) * 0.7853981634;
+            vec2 direction = vec2(cos(angle), sin(angle));
+            for (int step = 1; step <= 32; step++) {
+                float distance = float(step) - 0.5;
+                if (distance >= min(radius, distanceToEdge)) break;
+                vec2 uv = clamp(v_uv + direction * texel * float(step), texel * 0.5, 1.0 - texel * 0.5);
+                if ((texture(u_prev, uv).r >= 0.5) != inside) {
+                    distanceToEdge = distance;
+                    break;
+                }
+            }
+        }
+        float signedDistance = inside ? distanceToEdge : -distanceToEdge;
+        v = radius > 0.0 ? smoothstep(-radius, radius, signedDistance) : prev;
+        isOp = true;
+    }
     else if (u_kind == 11) {v=prev*texture(u_map,v_uv).b;isOp=true;}
     else if (u_kind == 10) {
         int part = int(texture(u_part, v_uv).r + 0.5);
@@ -1229,7 +1268,21 @@ vec3 envIrradiance(vec3 n) {
 }
 """
 
-SCENE_FS = HEADER + ENV + NOISE + """
+ALBEDO_VALIDATION = """
+uniform float u_albedoThreshold;
+uniform int u_linearAlbedo;
+vec3 validateAlbedo(vec3 color) {
+    vec3 encoded = color;
+    if (u_linearAlbedo == 1) {
+        encoded = mix(12.92 * color, 1.055 * pow(max(color, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055,
+                      step(vec3(0.0031308), color));
+    }
+    bool dark = max(max(encoded.r, encoded.g), encoded.b) < u_albedoThreshold;
+    return dark ? vec3(1.0, 0.0, 1.0) : encoded;
+}
+"""
+
+SCENE_FS = HEADER + ENV + NOISE + ALBEDO_VALIDATION + """
 uniform sampler2D u_texC, u_texR, u_texN, u_ao, u_curv, u_maskPrev, u_texE, u_thick, u_id, u_pos, u_wnrm;
 uniform sampler2D u_bakedNormal, u_bakedHeight;
 uniform sampler2D u_specGloss, u_coat;
@@ -1257,6 +1310,10 @@ void main() {
     vec3 tn = texture(u_texN, v_uv).xyz * 2.0 - 1.0;
     vec3 N = normalize(T * tn.x + B * tn.y + Ng * tn.z);
     vec4 c = texture(u_texC, v_uv);
+    if (u_mode == 23) {
+        o = vec4(validateAlbedo(c.rgb), 1.0);
+        return;
+    }
     vec4 rmh = texture(u_texR, v_uv);
     float ao = u_useAO == 1 ? texture(u_ao, v_uv).r : 1.0;
     if (u_mode == 18) { o = vec4(N * 0.5 + 0.5, 1.0); return; }

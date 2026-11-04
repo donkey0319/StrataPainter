@@ -3390,11 +3390,14 @@ class App:
                 basis = eng.mesh.extra.get("tangent_basis", {})
                 imgui.text_wrapped(basis.get("name", "Legacy") + (" / Blender " + basis["version"] if basis.get("backend") == "Blender" else ""))
             self._end_section()
-        if self._section("View", ["Display", "Layout"]):
+        if self._section("View", ["Display", "Layout", "Albedo threshold"]):
             before_mode = r.mode
             self.p_combo("Display", r, "mode", DISPLAY_MODES, dirty=False, tip="C cycles through the channels")
             if r.mode != before_mode:
                 eng.dirty = True
+            if r.mode == 23:
+                self.p_slider("Albedo threshold", r, "albedo_threshold", 0, 255, dirty=False,
+                              tip="sRGB code value. Magenta marks pixels whose largest Base Color component is below this threshold. Preview only.")
             if self._row("Layout", "F1 split, F2 3D, F3 2D"):
                 mode = [VIEW_3D, VIEW_SPLIT, VIEW_2D].index(self.view_mode)
                 v = self._seg("lay", ["3D", "3D + 2D", "2D"], mode, ["F2", "F1", "F3"],

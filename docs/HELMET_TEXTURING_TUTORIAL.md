@@ -34,3 +34,71 @@ J Hill textures a sci-fi helmet modeled by Breki Thor in *How to TEXTURE EVERYTH
 4. **Diagnostic and packed export.** Use known Base Color samples just below and above the selected threshold and independent AO, Roughness and Metallic values. Compare isolated channel pixels and the packed file. Verify the diagnostic never changes the exported Base Color, and that the destination interprets the packed components as data. [Export](EXPORT.md) · [Color pipeline](architecture/COLOR.md)
 
 Before changing an operation, review its existing implementation contract in the linked feature document and consult the [implementation status](IMPLEMENTATION_STATUS.md) and [implementation plan](STRATA_PAINTER_IMPLEMENTATION_PLAN.md). Use this inventory to define workflow acceptance, and use those documents to determine what has already been qualified.
+
+## Replicating the workflow in StrataPainter
+
+The following procedure uses StrataPainter's current controls. The source inventory
+above retains its evidence labels. This procedure provides native equivalents for
+the corroborated operations, with shader and filter limits stated below.
+
+1. Create or open the helmet mesh. Bake its mesh maps through Texture Set
+   Settings. Use folders for shell, hardware, plastic, coating, leather, wires
+   and visor. Add a fill inside each folder and restrict coverage with geometry,
+   ID or painted masks. Ordinary unmodified folders pass their children through
+   the existing accumulated stack. Set channel-specific blend and opacity in
+   the layer properties. [Bake controls](BAKE_DISPLAY_LIBRARY.md) · [Fill materials](FILL_MATERIALS.md)
+2. Set each base material's Base Color, Roughness and Metallic values. Assign
+   bitmap channel maps or native procedural content for grain and variations.
+   Choose UV or triplanar mapping and adjust scale, rotation and offset. Keep
+   roughness and height detail on independently enabled layers for later edits.
+   Use native generators and ordered mask effects for localized wear.
+   [Fill materials](FILL_MATERIALS.md) · [Procedural content](PROCEDURAL_IMPORTS.md)
+3. For linked paint chips, select the source layer and add **paint** in
+   **Mask effects**. Click **Paint this effect** and paint the chip coverage.
+   Add **mask_anchor** after the paint row and give **Mask anchor** a name.
+   Add an **anchor** mask effect to an upper primer fill and select that name
+   in **Anchor source**. Repeat for other consumers. Add **invert**, **levels**
+   or **bevel** after the reference to shape each consumer independently.
+   A Height-only fill with the bevel mask supplies the relief. Effect rows
+   evaluate in the Properties list's numbered order. [Effects](EFFECTS.md)
+4. Stamp the hardware and panel details on a Normal-enabled paint layer using
+   a brush map or projection. Add a content **anchor** to that lower layer.
+   On the upper wear layer add a **generator** mask effect, choose Edge Wear,
+   Dirt or Cavity, enable **Use normal anchor**, and choose the normal-detail
+   anchor. Tune **Micro normal strength** with the normal layer enabled and
+   disabled to check the response. [Brushes](BRUSHES.md) · [Effects](EFFECTS.md)
+5. Assign the decal image to a fill, select UV or planar projection, enable
+   decal clipping and adjust transform or Warp. Add mask paint and filters
+   for damage. Use the coverage on a Height fill for the sticker thickness.
+   Move the camera to check that the stored placement stays attached.
+   [Decal placement](AUTHORED_OBJECTS.md)
+6. Add overlays with channel enables, mask blending and layer opacity.
+   Enable Emissive on the light elements and inspect the Emissive display.
+   For wire labels, open **Layer > Paths, ribbons and text**, choose a font,
+   enter the label and edit its UV placement or planar warp over the cable.
+   This provides editable surface lettering. Text objects use UV or planar
+   placement, so cable UV layout determines how the letters follow the surface.
+   [Channels](CHANNELS.md) · [Text](AUTHORED_OBJECTS.md)
+7. Use an Opacity-enabled fill with Base Color and Roughness for a transparent
+   visor and export its opacity. The existing preview supports alpha blending
+   and alpha testing. Optical refraction and a dedicated glass transmission
+   shader remain outside the qualified preview. Validate that appearance in
+   the destination renderer. [Shader workflows](SHADER_WORKFLOWS.md) · [Delivery](DELIVERY.md)
+8. Choose **Albedo validation** in the viewport Display list. In Display
+   Settings, set **Albedo threshold** to 50. Magenta marks Base Color pixels
+   whose largest encoded sRGB component is below 50/255. Adjust the material
+   and compare both the 3D and UV views. Managed linear Rec.709 colors are
+   converted to encoded sRGB before this check. Threshold is session inspection
+   state. This checks dark albedo, with no metal-reflectance-range diagnostic.
+   It applies only during display and leaves exported material pixels intact.
+9. Open **Export Textures**, choose **Unreal Engine Packed** or edit the
+   template to assign AO to R, Roughness to G and Metallic to B. Review the
+   selected texture sets, names, size and format before exporting. Save a
+   portable project to retain editable paint, font and image resources.
+   [Export](EXPORT.md) · [Persistence](PERSISTENCE.md)
+
+The native bevel and micro-normal curvature operations approximate the corresponding
+SP effects. Their texture-pixel neighborhoods do not stitch across UV seams or
+tile boundaries. The new linked wear features require v15 projects. Exact
+commercial material assets, hidden values and the artist's complete cursor
+sequence remain unverified.

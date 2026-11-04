@@ -65,6 +65,47 @@ The two known broad-suite failures were not fixed by weakening assertions or cha
 
 T19 is verified within DELIVERY.md and EXTENSIONS.md contracts; continue T20 release/hardware/platform qualification and explicitly deferred extensions as separately scoped work. T18 is verified within SHADER_WORKFLOWS.md contracts. T17 is verified within AUTHORED_OBJECTS.md contracts; T16 within PROCEDURAL_IMPORTS.md and T15 within ADVANCED_BAKING.md. T14 is verified for authored/imported tile layouts; T21 adds bounded automatic multi-tile chart packing with unchanged-layout tiled revision guards. Keep one primary agent, targeted reads, concise logs, focused tests and one final regression pass per milestone. Preserve all uncommitted work. Physical tablet hardware remains unqualified.
 
+## Helmet tutorial workflow qualification
+
+The [helmet workflow reference](HELMET_TEXTURING_TUTORIAL.md) now includes native
+desktop instructions for material blockout, linked chip masks, normal-detail wear,
+decals, typography, emissive, opacity inspection and packed delivery.
+
+- Added positional scalar mask anchors, editable mask bevels and content-normal
+  anchor inputs to curvature-based generators. Existing content-anchor capture
+  semantics remain intact. New effects select native v15, with archive preflight
+  guarding placement, radius and strength. Existing project version selection
+  and legacy restoration remain supported.
+- Added Albedo validation to both 3D and UV displays with an editable session
+  threshold in sRGB code values. Managed linear colors are converted before the
+  check. This display diagnostic leaves composited and delivered pixels intact.
+- Seven local CPU/GPU scenarios pass for capture order, later source filters,
+  disabled/moved sources, rename, undo, bevel profiles, portable masks and normal
+  sources, resolution changes, malformed archives, actual ORM component values,
+  and managed/legacy diagnostic rendering.
+- Nineteen real effects UI assertions pass, including creation of mask anchors
+  and bevels, enabling the normal input, selecting its source, independent paint,
+  persistent identity selection and portable reopen. Screenshots of the new
+  normal controls and the reopened workflow were visually inspected.
+- One final 14-suite regression passes user channels, authored objects and their
+  desktop controls, effects, channels, transactions, persistence, materials,
+  bake controls, managed color, UV desktop painting, legacy fixtures and CPU
+  export. The feature suite retains its documented low-flow failure at 101/102.
+  No unexpected failures occurred. The runner confirms unchanged application
+  sources and local suite during qualification. Report and logs are in
+  .artifacts/tutorial-regression.
+- Focused local evidence is in tests/tutorial_workflow_check.py,
+  tests/tutorial_ui_check.py and .artifacts/tutorial-ui-final. These files remain
+  ignored and excluded from the Git index.
+
+Bevels use an eight-direction distance approximation with a 0–32 texture-pixel
+radius. Normal-derived curvature is a local vector-difference approximation.
+Neither filter stitches UV seams or tile neighborhoods. Glass uses the existing
+alpha preview, with optical refraction left to a destination renderer. The
+albedo diagnostic checks dark values only. Adobe filter pixel equivalence and
+the complete artist cursor sequence remain unverified. See [effects](EFFECTS.md)
+for the capture and generator contracts.
+
 ## T03 qualification
 
 - `tests/transactions_check.py --gpu .artifacts/transactions-t03-qualified`: 27/27 pass, including stale anchor pixels, copied references, tree/raster/quick-mask saved markers, shared-set effects, resource undo and unsafe instance rejection.

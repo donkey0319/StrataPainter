@@ -9,7 +9,7 @@ import numpy as np
 from .. import shaders as S
 from ..viewinput import UVMapping
 
-UV_FS = S.HEADER + """
+UV_FS = S.HEADER + S.ALBEDO_VALIDATION + """
 uniform sampler2D u_col; uniform sampler2D u_rmh; uniform sampler2D u_nrm;
 uniform sampler2D u_mask; uniform sampler2D u_ao; uniform sampler2D u_curv; uniform sampler2D u_cov;
 uniform sampler2D u_extra;
@@ -45,6 +45,7 @@ void main() {
     else if (u_mode == 20) c = u_materialModel==1 ? texture(u_extra, uv).rgb : mix(vec3(.04),pow(texture(u_col,uv).rgb,vec3(2.2)),rmh.g);
     else if (u_mode == 21) c = vec3(u_materialModel==1 ? clamp(1.0-texture(u_extra, uv).a,.04,1.0) : clamp(rmh.r,.04,1.0));
     else if (u_mode == 22) c = u_hasCoat==1 ? vec3(texture(u_extra, uv).rg,0.0) : vec3(0.,.1,0.);
+    else if (u_mode == 23) c = validateAlbedo(texture(u_col, uv).rgb);
     else if (u_mode == 18) {
         vec3 N = normalize(texture(u_worldNormal, uv).xyz);
         vec4 tangent = texture(u_tangent, uv);
@@ -201,6 +202,8 @@ class UVView:
             if name in p:
                 p[name] = i
         for name, v in (("u_mode", int(engine.renderer.mode)), ("u_scale", self._scale(w, h)),
+                        ("u_albedoThreshold", float(engine.renderer.albedo_threshold) / 255.0),
+                        ("u_linearAlbedo", int(engine.color.managed)),
                         ("u_center", tuple(np.asarray(self.center) - (_tile.address.to_list() if _tile is not None else (0, 0)))), ("u_px", (1.0 / w, 1.0 / h)),
                         ("u_bmin", tuple(engine.mesh.positions.min(0))), ("u_bmax", tuple(engine.mesh.positions.max(0)))):
             if name in p:

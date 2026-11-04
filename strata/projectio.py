@@ -18,7 +18,7 @@ import zipfile
 
 import numpy as np
 
-VERSION = 14
+VERSION = 15
 _HASH = re.compile(r"^[a-f0-9]{64}$")
 _BAKES = {"position": (4, "f4"), "world_normal": (4, "f2"), "curvature": (4, "f2"),
           "projection_diagnostics": (4, "f1"),
@@ -301,6 +301,16 @@ def validate(meta, arrays):
                 if not isinstance(effect, dict):
                     raise ValueError("Invalid effect")
                 identity(effect)
+                kind, params = effect.get("kind"), effect.get("params", {})
+                if kind in ("mask_anchor", "bevel") or (kind == "generator" and params.get("micro_normal")):
+                    if version < 15 or effect not in layer.get("mask_effects", []):
+                        raise ValueError("Mask anchors, bevel and micro normals require version-15 mask effects")
+                    for key, default, lo, hi in (("radius", 4.0, 0, 32), ("micro_strength", 1.0, 0, 16)):
+                        value = params.get(key, default)
+                        if not isinstance(value, (int, float)) or not np.isfinite(value) or not lo <= value <= hi:
+                            raise ValueError("Invalid mask effect " + key)
+                    if kind == "mask_anchor" and (not isinstance(params.get("name"), str) or not params["name"].strip()):
+                        raise ValueError("Mask anchor requires a name")
                 if effect.get("kind") == "graph":
                     from .graphs import validate as validate_graph
                     if version < 11:raise ValueError("Native graphs require project version 11")
