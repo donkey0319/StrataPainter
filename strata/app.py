@@ -3199,8 +3199,21 @@ class App:
             if size > 0:
                 p = imgui.get_cursor_screen_pos()
                 imgui.dummy(V2(size, size))
-                imgui.get_window_draw_list().add_circle_filled(
-                    V2(p.x + size / 2, p.y + size / 2), size / 2, col32(*b.color))
+                draw = imgui.get_window_draw_list()
+                center = V2(p.x + size / 2, p.y + size / 2)
+                draw.add_circle_filled(center, size / 2, col32(*b.color))
+                # Paint a soft specular spot inside the flat swatch.
+                light = V2(center.x, center.y - size * 0.17)
+                roughness = float(np.clip(b.rough, 0, 1))
+                metallic = float(np.clip(b.metal, 0, 1))
+                spread = size * (0.08 + 0.23 * roughness)
+                strength = 0.92 - 0.53 * roughness
+                reflection = [1 - metallic * 0.65 * (1 - value) for value in b.color]
+                for ring in range(16, 0, -1):
+                    fraction = ring / 16
+                    amount = strength * (1 - fraction * fraction) ** 2
+                    color = [base + (lit - base) * amount for base, lit in zip(b.color, reflection)]
+                    draw.add_circle_filled(light, spread * fraction, col32(*color))
         self.p_channels("Channels", b, False, tip="Which channels the brush paints")
         self._material_channels(b, dirty=False)
         for channel in CHANNEL_DESCRIPTORS:
