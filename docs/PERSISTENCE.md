@@ -75,6 +75,16 @@ that cannot be reconstructed; relink them or explicitly clear them first.
 
 ## Failure behavior
 
+When a project has unsaved edits, opening another archive, creating a project,
+or importing a Painter project asks whether to save, discard, or cancel. This
+also covers archives opened by dropping a file onto the window. Save and Continue
+switches projects only after the save succeeds. Cancelling the file picker keeps
+the current project open.
+
+Failed manual project saves show a dialog with the destination when available
+and the error. The project remains open so you can choose a different destination
+with Save As or retry after resolving the error.
+
 Saving writes a sibling temporary archive, validates it, flushes it, and replaces
 the destination only after success. With `backups=N`, previous archives rotate
 through `.bak1` to `.bakN`. The existing destination remains present if the new

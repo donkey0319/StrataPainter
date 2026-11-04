@@ -956,3 +956,16 @@ general transform gizmos, specialist shader/rendering/particle workflows, broade
 resource UX, proprietary graph fidelity and the existing tile/hardware/platform
 limits remain explicit in the companion's remaining-scope table. No release/tag,
 frozen build or full artist-migration certification is claimed.
+
+## Project protection follow-up
+
+The desktop project workflow now guards archive open, file drop, New Project,
+and Painter import against accidental loss of edits. Manual save failures display
+a dialog while the current project stays open. This addresses the manual-save
+visibility problem in [REL01](SUBSTANCE_PAINTER_USER_WORKFLOW_COMPLAINTS.md#rel01-save-failures-are-too-easy-to-miss).
+
+The local desktop regression exercised a dropped archive with cancel, discard,
+successful Save and Continue, and a destination that rejects replacement. It also
+verified the existing quit and save flow. All seven CPU archive contracts passed,
+including preservation of the previous archive after a publication failure.
+The persistence suite's six optional GPU cases were skipped in this run.

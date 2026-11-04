@@ -306,6 +306,8 @@ class App:
         self._last_uv_hit = None
         self.open_bake = self.open_close = False
         self.open_quit, self._quit_ok, self._close_unsaved = False, False, False
+        self._project_replacement = None
+        self._save_failure = None
         self.bake_settings, self.bake_all = None, True
         self._strip_btn_pos = {}
         self.dock_id = 0
@@ -440,7 +442,7 @@ class App:
         p = paths[0]
         ext = os.path.splitext(p)[1].lower()
         if ext == ".strata" or re.search(r"\.strata\.bak[0-9]+$", p, re.IGNORECASE):
-            self._run_busy("Opening project...", lambda: self._open(p))
+            self._request_open(p)
         elif ext in (".obj", ".fbx", ".gltf", ".glb"):
             self.new_path, self.new_mesh_idx = p, len(BUILTIN_MESHES)
             self.open_new = True
@@ -483,25 +485,41 @@ class App:
             self.msg(str(diagnostic.get("message", diagnostic)))
 
     def _save(self, save_as=False, portable=False):
-        self._finish_fill_projection()
-        self._finish_property_edit()
         path = self.project_path
-        if save_as or not path:
-            if pfd is None:
-                self.msg("File dialogs unavailable"); return False
-            path = pfd.save_file("Save project", "untitled.strata", ["Strata project", "*.strata"]).result()
-            if not path:
-                return False
-            if not path.lower().endswith(".strata"):
-                path += ".strata"
         try:
+            self._finish_fill_projection()
+            self._finish_property_edit()
+            if save_as or not path:
+                if pfd is None:
+                    raise RuntimeError("The system file dialog is unavailable.")
+                path = None
+                path = pfd.save_file("Save project", "untitled.strata", ["Strata project", "*.strata"]).result()
+                if not path:
+                    return False
+                if not path.lower().endswith(".strata"):
+                    path += ".strata"
             self.engine.save(path, portable=portable, backups=self.project_ui.backups)
-            self.project_path = path
-            self.msg(f"Saved {'portable project ' if portable else ''}{path}")
-            return True
         except Exception as e:
+            self._save_failure = (path, str(e) or type(e).__name__)
             self.msg(f"Save failed: {e}")
             return False
+        self.project_path = path
+        self._save_failure = None
+        self.msg(f"Saved {'portable project ' if portable else ''}{path}")
+        return True
+
+    def _request_replacement(self, action):
+        self._finish_fill_projection()
+        self._finish_property_edit()
+        self.engine.end_stroke()
+        if self.engine.modified:
+            self._project_replacement = action
+        else:
+            action()
+
+    def _request_open(self, path):
+        self._request_replacement(
+            lambda: self._run_busy("Opening project...", lambda: self._open(path)))
 
     # ------------------------------------------------------------------ quitting
     def _on_close_request(self, window):
@@ -531,7 +549,7 @@ class App:
             self.msg("File dialogs unavailable"); return
         r = pfd.open_file("Open project", "", ["Strata project and backups", "*.strata *.strata.bak*"]).result()
         if r:
-            self._run_busy("Opening project...", lambda: self._open(r[0]))
+            self._request_open(r[0])
 
     def _ask_mesh(self):
         if pfd is None:
@@ -1409,6 +1427,7 @@ class App:
         self.status_bar(ww, wh, status_h)
         self.dialogs()
         self.extra_dialogs()
+        self._project_protection_dialogs()
         self.quick_brush()
         self.palette.draw(self.reg, self.msg, self.ui_scale)
         if getattr(self, "_property_edit_key", None) is not None and not imgui.is_any_item_active():
@@ -4567,6 +4586,45 @@ class App:
             _tip("Keep working.")
             imgui.end_popup()
 
+    def _project_protection_dialogs(self):
+        center = imgui.get_main_viewport().get_center()
+        auto = imgui.WindowFlags_.always_auto_resize
+        popup_flags = imgui.PopupFlags_.any_popup_id | imgui.PopupFlags_.any_popup_level
+        if (self._project_replacement is not None and self._save_failure is None
+                and not imgui.is_popup_open("", popup_flags)):
+            imgui.open_popup("Replace Project")
+        imgui.set_next_window_pos(center, imgui.Cond_.appearing, V2(0.5, 0.5))
+        if imgui.begin_popup_modal("Replace Project", None, auto)[0]:
+            imgui.text("Save your changes before switching projects?")
+            save = imgui.button("Save and Continue")
+            imgui.same_line()
+            discard = imgui.button("Discard Changes")
+            imgui.same_line()
+            cancel = imgui.button("Cancel") or imgui.is_key_pressed(imgui.Key.escape)
+            action = self._project_replacement
+            if save or discard or cancel:
+                self._project_replacement = None
+                imgui.close_current_popup()
+                if discard or (save and self._save()):
+                    action()
+            imgui.end_popup()
+
+        if self._save_failure is not None and not imgui.is_popup_open("", popup_flags):
+            imgui.open_popup("Project Save Failed")
+        imgui.set_next_window_pos(center, imgui.Cond_.appearing, V2(0.5, 0.5))
+        if imgui.begin_popup_modal("Project Save Failed", None, auto)[0]:
+            path, error = self._save_failure
+            imgui.push_text_wrap_pos(460 * self.ui_scale)
+            imgui.text_wrapped("Strata couldn't save the project. Your current work is still open.")
+            if path:
+                imgui.text_wrapped(str(path))
+            imgui.text_wrapped(error)
+            imgui.pop_text_wrap_pos()
+            if imgui.button("OK") or imgui.is_key_pressed(imgui.Key.escape):
+                self._save_failure = None
+                imgui.close_current_popup()
+            imgui.end_popup()
+
     def _export_template(self):
         return self.export_custom_template or texture_exporter.OUTPUT_TEMPLATES[self.export_templates[self.export_preset]]
 
@@ -4735,8 +4793,7 @@ class App:
             if self.new_uv_info:
                 imgui.text_wrapped(self.new_uv_info)
             imgui.text_wrapped("Existing projects retain their saved workflow. Managed pickers use sRGB colors; scalar maps and normals are data.")
-            imgui.text_disabled("Mesh maps (AO, curvature, position, normal) are baked automatically.\n"
-                                "Starts a fresh layer stack: unsaved changes are lost.")
+            imgui.text_disabled("Mesh maps (AO, curvature, position, normal) are baked automatically.")
             ok = not from_file or bool(self.new_path)
             if not ok:
                 imgui.begin_disabled()
@@ -4747,10 +4804,12 @@ class App:
 
                     def job():
                         self._new_project(load_mesh(path, require_uvs=not self.new_auto_uv), res)
-                    self._run_busy(f"Loading {os.path.basename(path)}...", job)
+                    self._request_replacement(
+                        lambda: self._run_busy(f"Loading {os.path.basename(path)}...", job))
                 else:
                     name = names[self.new_mesh_idx]
-                    self._run_busy(f"Baking {name}...", lambda: self._new_project(name, res))
+                    self._request_replacement(
+                        lambda: self._run_busy(f"Baking {name}...", lambda: self._new_project(name, res)))
                 imgui.close_current_popup()
             if not ok:
                 imgui.end_disabled()
@@ -4787,12 +4846,12 @@ class App:
             imgui.push_text_wrap_pos(420 * s)
             imgui.text_disabled("Brings in the mesh, the layer stack and the recorded paint strokes, which are "
                                 "replayed with Strata's brush. Painter's procedural materials, filters and "
-                                "generators are approximated with Strata's own; a report lists what changed. "
-                                "Starts a new Strata project: unsaved changes are lost.")
+                                "generators are approximated with Strata's own. A report lists what changed.")
             imgui.pop_text_wrap_pos()
             self.import_ui.budgets()
             if imgui.button("Import", V2(120 * s, 0)):
-                self._import_spp(info, self.spp_set)
+                set_index = self.spp_set
+                self._request_replacement(lambda: self._import_spp(info, set_index))
                 imgui.close_current_popup()
             imgui.same_line()
             if imgui.button("Cancel", V2(120 * s, 0)) or imgui.is_key_pressed(imgui.Key.escape):
