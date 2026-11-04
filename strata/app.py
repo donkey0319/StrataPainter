@@ -1848,8 +1848,8 @@ class App:
             self.engine.cancel_edit()
             raise
 
-    def p_slider(self, label, obj, attr, lo=0.0, hi=1.0, fmt="%.2f", dirty=False, log=False, tip="", multi=False):
-        if not self._row(label, tip):
+    def p_slider(self, label, obj, attr, lo=0.0, hi=1.0, fmt="%.2f", dirty=False, log=False, tip="", multi=False, in_row=False):
+        if not in_row and not self._row(label, tip):
             return
         flags = imgui.SliderFlags_.logarithmic if log else 0
         ch, v = imgui.slider_float("##" + label, float(getattr(obj, attr)), lo, hi, fmt, flags)
@@ -1874,8 +1874,8 @@ class App:
                 for l in self._sel_layers():
                     setattr(l, attr, v)
 
-    def p_color(self, label, obj, attr, dirty=False, tip=""):
-        if not self._row(label, tip):
+    def p_color(self, label, obj, attr, dirty=False, tip="", in_row=False):
+        if not in_row and not self._row(label, tip):
             return
         ch, c = imgui.color_edit3("##" + label, list(getattr(obj, attr)), imgui.ColorEditFlags_.no_inputs)
         if dirty:
@@ -3191,7 +3191,6 @@ class App:
     def _props_brush_material(self):
         b = self.engine.brush
         labels = ["Preview", "Channels"] + [channel.value_label for channel in CHANNEL_DESCRIPTORS]
-        labels += [channel.value_label + " map" for channel in CHANNEL_DESCRIPTORS]
         if not self._section("Material (brush)", labels):
             return
         if self._row("Preview"):
@@ -3215,33 +3214,33 @@ class App:
                     color = [base + (lit - base) * amount for base, lit in zip(b.color, reflection)]
                     draw.add_circle_filled(light, spread * fraction, col32(*color))
         self.p_channels("Channels", b, False, tip="Which channels the brush paints")
-        self._material_channels(b, dirty=False)
-        for channel in CHANNEL_DESCRIPTORS:
-            if not self._row(channel.value_label + " map", "Image stamped by the Paint tool."):
-                continue
-            key = channel.key
-            path = b.maps.get(key)
-            imgui.push_id("brush_map_" + key)
-            if path:
-                imgui.text_wrapped(os.path.basename(path))
-                _tip(path)
-            if imgui.button("Replace..." if path else "Load..."):
-                replacement = self._load_image(channel.value_label + " brush map")
-                if replacement:
-                    try:
-                        self.engine.resources.texture(replacement, channel.resource_kind)
-                        b.maps = {**b.maps, key: replacement}
-                        b.enabled[channel.index] = True
-                    except Exception as error:
-                        self.msg(f"Brush map failed: {error}")
-            if path:
-                imgui.same_line()
-                if imgui.button("Clear"):
-                    b.maps = {k: value for k, value in b.maps.items() if k != key}
-            imgui.pop_id()
+        self._material_channels(b, dirty=False, brush_maps=True)
         self._end_section()
 
-    def _material_channels(self, obj, dirty):
+    def _brush_map_button(self, brush, channel, width):
+        key = channel.key
+        path = brush.maps.get(key)
+        imgui.push_id("brush_map_" + key)
+        if imgui.button("Replace..." if path else "Load...", V2(width, 0)):
+            replacement = self._load_image(channel.value_label + " brush map")
+            if replacement:
+                try:
+                    self.engine.resources.texture(replacement, channel.resource_kind)
+                    brush.maps = {**brush.maps, key: replacement}
+                    brush.enabled[channel.index] = True
+                except Exception as error:
+                    self.msg(f"Brush map failed: {error}")
+        if path:
+            _tip(path + "\nRight-click to clear the map.")
+            if imgui.begin_popup_context_item():
+                if imgui.menu_item_simple("Clear map"):
+                    brush.maps = {k: value for k, value in brush.maps.items() if k != key}
+                imgui.end_popup()
+        else:
+            _tip("Load " + channel.value_label.lower() + " brush map")
+        imgui.pop_id()
+
+    def _material_channels(self, obj, dirty, brush_maps=False):
         for channel in CHANNEL_DESCRIPTORS:
             tip = channel.semantic
             if channel.key == "H":
@@ -3250,12 +3249,25 @@ class App:
                 tip = "Encoded tangent-space normal: (0.5, 0.5, 1) is flat"
             elif channel.key == "O":
                 tip = "Opacity channel value; layer opacity controls the whole layer separately"
+            if not self._row(channel.value_label, tip):
+                continue
+            if brush_maps:
+                style = imgui.get_style()
+                button_width = imgui.calc_text_size("Replace...").x + 2 * style.frame_padding.x
+                value_width = max(imgui.get_frame_height(), imgui.get_content_region_avail().x
+                                  - button_width - style.item_spacing.x)
+                imgui.set_next_item_width(value_width)
+                value_x = imgui.get_cursor_pos_x()
             imgui.begin_disabled(bool(getattr(obj, "maps", {}).get(channel.key)))
             if channel.value_components == 3:
-                self.p_color(channel.value_label, obj, channel.attribute, dirty=dirty, tip=tip)
+                self.p_color(channel.value_label, obj, channel.attribute, dirty=dirty, tip=tip, in_row=True)
             else:
-                self.p_slider(channel.value_label, obj, channel.attribute, dirty=dirty, tip=tip)
+                self.p_slider(channel.value_label, obj, channel.attribute, dirty=dirty, tip=tip, in_row=True)
             imgui.end_disabled()
+            if brush_maps:
+                imgui.same_line()
+                imgui.set_cursor_pos_x(value_x + value_width + style.item_spacing.x)
+                self._brush_map_button(obj, channel, button_width)
 
     def _props_mask_paint(self):
         b = self.engine.brush
