@@ -1557,6 +1557,7 @@ class App:
         if cursor is not None:
             hit, nrm = cursor
             r.draw_cursor(hit, nrm, e.brush_radius(hit), e._vp, rect)
+            self._draw_lazy_radius(self.vp_rect)
 
     def _draw_fill_wire(self, rect, cursor):
         """Polygon fill shows the mesh's faces and edges, and tints what a click would fill."""
@@ -3927,6 +3928,28 @@ class App:
         draw = imgui.get_background_draw_list()
         draw.push_clip_rect(V2(x, y), V2(x + w, y + h))
         draw.add_polyline(points, col32(1, 1, 1, .9), 1., int(imgui.ImDrawFlags_.closed))
+        draw.pop_clip_rect()
+        self._draw_lazy_radius(self.uv_rect)
+
+    def _draw_lazy_radius(self, rect):
+        e = self.engine
+        stroke = e._stroke or e._tile_stroke
+        radius = (stroke.brush if stroke is not None else e.brush).lazy
+        if radius <= 0 or self.poly_fill or imgui.get_io().key_alt:
+            return
+
+        mx, my = imgui.get_io().mouse_pos
+        sx, sy = self.fb_scale
+        rx, ry = radius / sx, radius / sy
+        dash_count = max(4, round(math.tau * max(rx, ry) / 11))
+        step = math.tau / dash_count
+        x, y, w, h = rect
+        draw = imgui.get_background_draw_list()
+        draw.push_clip_rect(V2(x, y), V2(x + w, y + h), True)
+        for i in range(dash_count):
+            angles = (step * (i + fraction) for fraction in (0, .2, .4, .6))
+            points = [V2(mx + math.cos(t) * rx, my + math.sin(t) * ry) for t in angles]
+            draw.add_polyline(points, col32(1, 1, 1, .75), 1.25, 0)
         draw.pop_clip_rect()
 
     # ------------------------------------------------------------------ axis gizmo
