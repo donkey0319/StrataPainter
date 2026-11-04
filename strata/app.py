@@ -3169,15 +3169,42 @@ class App:
 
     def _props_brush_material(self):
         b = self.engine.brush
-        labels = ["Channels"] + [channel.value_label for channel in CHANNEL_DESCRIPTORS]
+        labels = ["Preview", "Channels"] + [channel.value_label for channel in CHANNEL_DESCRIPTORS]
+        labels += [channel.value_label + " map" for channel in CHANNEL_DESCRIPTORS]
         if not self._section("Material (brush)", labels):
             return
-        size = 100 * self.ui_scale
-        p = imgui.get_cursor_screen_pos()
-        self._sphere_preview(imgui.get_window_draw_list(), [MaterialPreviews.material(b)], p, size)
-        imgui.dummy(V2(size, size))
+        if self._row("Preview"):
+            size = min(64 * self.ui_scale, imgui.get_content_region_avail().x)
+            if size > 0:
+                p = imgui.get_cursor_screen_pos()
+                imgui.dummy(V2(size, size))
+                imgui.get_window_draw_list().add_circle_filled(
+                    V2(p.x + size / 2, p.y + size / 2), size / 2, col32(*b.color))
         self.p_channels("Channels", b, False, tip="Which channels the brush paints")
         self._material_channels(b, dirty=False)
+        for channel in CHANNEL_DESCRIPTORS:
+            if not self._row(channel.value_label + " map", "Image stamped by the Paint tool."):
+                continue
+            key = channel.key
+            path = b.maps.get(key)
+            imgui.push_id("brush_map_" + key)
+            if path:
+                imgui.text_wrapped(os.path.basename(path))
+                _tip(path)
+            if imgui.button("Replace..." if path else "Load..."):
+                replacement = self._load_image(channel.value_label + " brush map")
+                if replacement:
+                    try:
+                        self.engine.resources.texture(replacement, channel.resource_kind)
+                        b.maps = {**b.maps, key: replacement}
+                        b.enabled[channel.index] = True
+                    except Exception as error:
+                        self.msg(f"Brush map failed: {error}")
+            if path:
+                imgui.same_line()
+                if imgui.button("Clear"):
+                    b.maps = {k: value for k, value in b.maps.items() if k != key}
+            imgui.pop_id()
         self._end_section()
 
     def _material_channels(self, obj, dirty):

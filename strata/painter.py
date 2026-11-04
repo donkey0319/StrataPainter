@@ -256,28 +256,29 @@ class Painter:
             uniform_value = tuple(map(float, value)) if channel.value_components > 1 else float(value)
             g.set(p, "u_" + channel.attribute, uniform_value)
 
-    def _projection_units(self, p, brush: Brush, view: View, active: bool):
+    def _map_units(self, p, brush: Brush, view: View, projection: bool, erase=False):
         g, res = self.gpu, self.resources
         units, has = {}, [0] * N_CH
         size = None
-        if active and res:
+        maps = brush.proj_maps if projection else brush.maps
+        if res and (projection or (not brush.user_channel and not erase)):
             for channel in CHANNEL_DESCRIPTORS:
                 i = channel.index
-                path = brush.proj_maps.get(channel.key)
+                path = maps.get(channel.key)
                 if not path or not brush.enabled[i]:
                     continue
                 try:
                     t = res.texture(path, channel.resource_kind)
                 except Exception as e:
-                    print(f"[strata] projection map {path}: {e}")
+                    print(f"[strata] brush map {path}: {e}")
                     continue
                 units[f"u_p{i}"] = (4 + i, t)
                 has[i] = 1
                 size = size or t.size
         for channel in CHANNEL_DESCRIPTORS:
             units.setdefault(f"u_p{channel.index}", (4 + channel.index, g.black))
-        active = active and any(has)
-        g.set(p, "u_projActive", int(active))
+        active = projection and any(has)
+        g.set(p, "u_projActive", (1 if projection else 2) if any(has) else 0)
         if "u_hasP" in p:
             p["u_hasP"].value = tuple(has[:p["u_hasP"].array_length]) if p["u_hasP"].array_length > 1 else has[0]
         if active and "u_projXf" in p:
@@ -301,7 +302,7 @@ class Painter:
         p = self.gpu.program("brush_sparse_" + str(view.uv_mapping is not None) + "".join(keys),
                              vertex, channel_shader(S.BRUSH_PAINT_FS, keys))
         units = self._common(p, brush, view, dab, quick, gm.mesh.radius)
-        units.update(self._projection_units(p, brush, view, projection))
+        units.update(self._map_units(p, brush, view, projection, erase=bool(brush.mode)))
         self._paint_values(p, brush, False)
         self.gpu.bind(p, units)
         ctx = self.gpu.ctx
@@ -390,7 +391,7 @@ class Painter:
                 return
             p = g.program("fill_sparse_" + "".join(keys), S.UV_VS, channel_shader(S.BRUSH_PAINT_FS, keys))
             units = self._common(p, brush, view, None, None, gm.mesh.radius)
-            units.update(self._projection_units(p, brush, view, False))
+            units.update(self._map_units(p, brush, view, False, erase=erase))
             self._paint_values(p, brush, erase)
             g.bind(p, units)
             textures = [target[key] for key in keys]

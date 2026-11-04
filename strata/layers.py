@@ -410,6 +410,7 @@ class Brush:
     stencil_enabled: bool = True
     stencil_xform: list = field(default_factory=lambda: [0.5, 0.5, 1.0, 0.0])  # cx, cy (viewport 0-1), scale, rotation deg
     stencil_tiling: int = 0
+    maps: dict = field(default_factory=dict)           # brush stamp: channel key -> image path
     proj_maps: dict = field(default_factory=dict)       # projection tool: channel key -> image path
     proj_xform: list = field(default_factory=lambda: [0.5, 0.5, 1.0, 0.0])
     proj_tiling: int = 3

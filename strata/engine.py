@@ -547,6 +547,7 @@ class Engine:
         # Brushes and the display environment intentionally carry into new projects.
         # Retain their extracted dependencies rather than deleting live file paths.
         retained = {self.brush.alpha, self.brush.stencil, self.renderer.env_path}
+        retained.update(self.brush.maps.values())
         retained.update(self.brush.proj_maps.values())
         self.project_resources = [r for r in self.project_resources if r.get("resolved") in retained]
         retained_ids = {r["id"] for r in self.project_resources}
@@ -2950,6 +2951,7 @@ class Engine:
                 "cages": [(ts, ts.bake_settings.cage_path, ts.bake_settings.cage_hash) for ts in self.sets],
                 "tile_sequences": [(ts, copy.deepcopy(ts.tiles.sequences)) for ts in self.sets if ts.tiles is not None],
                 "brush": {"alpha": self.brush.alpha, "stencil": self.brush.stencil,
+                          "maps": dict(self.brush.maps),
                           "proj_maps": dict(self.brush.proj_maps)},
                 "authored": [(layer,copy.deepcopy(layer.authored)) for layer in layers if layer.authored is not None],
                 "import_state": copy.deepcopy(self.import_state),
@@ -2974,6 +2976,7 @@ class Engine:
         for ts, sequences in state.get("tile_sequences", []):
             ts.tiles.sequences = copy.deepcopy(sequences)
         self.brush.alpha, self.brush.stencil = state["brush"]["alpha"], state["brush"]["stencil"]
+        self.brush.maps = dict(state["brush"].get("maps", {}))
         self.brush.proj_maps = dict(state["brush"]["proj_maps"])
         for layer,authored in state.get("authored",[]):layer.authored=copy.deepcopy(authored)
         self.import_state=copy.deepcopy(state.get("import_state",self.import_state))
@@ -3075,6 +3078,7 @@ class Engine:
             owner[key]=replacements.get(owner[key],owner[key])
         for attr in ("alpha", "stencil"):
             setattr(self.brush, attr, replacements.get(getattr(self.brush, attr), getattr(self.brush, attr)))
+        self.brush.maps = {k: replacements.get(v, v) for k, v in self.brush.maps.items()}
         self.brush.proj_maps = {k: replacements.get(v, v) for k, v in self.brush.proj_maps.items()}
         if environment is not None:
             if self.renderer.env_tex is not None:

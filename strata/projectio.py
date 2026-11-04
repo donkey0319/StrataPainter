@@ -77,8 +77,9 @@ def resource_slots(meta):
     for key, role in (("alpha", "alpha"), ("stencil", "stencil")):
         if brush.get(key):
             yield brush, key, role
-    for key in list(brush.get("proj_maps", {})):
-        yield brush["proj_maps"], key, "texture"
+    for slot in ("maps", "proj_maps"):
+        for key in brush.get(slot, {}):
+            yield brush[slot], key, "texture"
     if meta.get("environment"):
         yield meta, "environment", "environment"
     for node in meta.get("journal", {}).get("nodes", {}).values():

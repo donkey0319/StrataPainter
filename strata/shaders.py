@@ -982,7 +982,7 @@ uniform sampler2D u_quick;
 uniform int u_hasQuick;
 uniform float u_grain, u_grainScale, u_flow;
 in vec3 v_pos; in vec3 v_nrm; in vec2 v_uv;
-vec2 g_screen;
+vec2 g_screen, g_stamp;
 vec3 g_P;
 bool tileUV(inout vec2 t, int mode) {
     bool tx = mode == 1 || mode == 3, ty = mode == 2 || mode == 3;
@@ -1002,6 +1002,7 @@ float dabAlpha() {
         g_screen = (transpose(u_uvAxes) * (v_uv - u_uvCenter)) / u_uvScale + 0.5;
         if (texture(u_uvCoverage, v_uv).r < 0.5) return -1.0;
     }
+    g_stamp = v_uv;
     if (u_full == 1) return 1.0;
     vec3 D = P - u_hit;
     float d3 = length(D);
@@ -1016,6 +1017,7 @@ float dabAlpha() {
         else { L = t / u_radius; a *= 1.0 - smoothstep(0.35, 1.0, abs(dot(D, u_fN)) / u_radius); }
     }
     L = vec2(u_rot.x * L.x + u_rot.y * L.y, -u_rot.y * L.x + u_rot.x * L.y);
+    g_stamp = clamp(L * 0.5 + 0.5, 0.0, 1.0);
     if (u_hasAlpha == 1) {
         if (abs(L.x) >= 1.0 || abs(L.y) >= 1.0) return -1.0;
         float t = texture(u_alpha, L * 0.5 + 0.5).r;
@@ -1048,7 +1050,7 @@ BRUSH_PAINT_FS = HEADER + BRUSH_LIB + """
 uniform int u_en[7];
 uniform vec3 u_color, u_normal, u_emissive;
 uniform float u_rough, u_metal, u_height, u_opac;
-uniform int u_projActive;
+uniform int u_projActive; // 0: constants, 1: screen projection, 2: brush maps
 uniform int u_hasP[7];
 uniform sampler2D u_p0, u_p1, u_p2, u_p3, u_p4, u_p5, u_p6;
 uniform mat3 u_projXf;
@@ -1066,9 +1068,12 @@ void main() {
     vec3 col = u_color, nm = u_normal, em = u_emissive;
     float ro = u_rough, me = u_metal, he = u_height, op = u_opac;
     float colA = 1.0;
-    if (u_projActive == 1) {
-        vec2 t = (u_projXf * vec3(g_screen * u_viewport, 1.0)).xy;
-        if (!tileUV(t, u_projTile)) discard;
+    if (u_projActive != 0) {
+        vec2 t = g_stamp;
+        if (u_projActive == 1) {
+            t = (u_projXf * vec3(g_screen * u_viewport, 1.0)).xy;
+            if (!tileUV(t, u_projTile)) discard;
+        }
         if (u_hasP[0] == 1) { vec4 s = texture(u_p0, t); col = s.rgb; colA = s.a; }
         if (u_hasP[1] == 1) ro = texture(u_p1, t).r;
         if (u_hasP[2] == 1) me = texture(u_p2, t).r;
