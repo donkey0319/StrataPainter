@@ -78,6 +78,13 @@ class Compositor:
         self.p_copy = g.fs_program("copy4", S.COPY4_FS)
         self.p_normal = g.fs_program("nfromh", S.NORMAL_FROM_HEIGHT_FS)
         self.p_preview = g.fs_program("mask_preview", S.MASK_PREVIEW_FS)
+        self._set_mesh_uniforms()
+
+    def _set_mesh_uniforms(self):
+        # Programs are shared by all compositors, including material thumbnails.
+        # Mesh-dependent uniforms must follow the current evaluator, not whichever
+        # mesh happened to create or last use the cached shader program.
+        mesh, g = self.mesh, self.gpu
         lo, hi = mesh.bounds
         for p in (self.p_content, self.p_mbase, self.p_meffect):
             g.set(p, "u_meshSize", float(mesh.radius * 2))
@@ -109,6 +116,7 @@ class Compositor:
     def _use(self, fbo):
         fbo.use()
         self.gpu.ctx.viewport = (0, 0, self.res, self.res)
+        self.gpu.ctx.scissor = None
 
     def _draw(self, prog):
         self.gpu.draw_quad(prog)
@@ -141,8 +149,12 @@ class Compositor:
                   cache_at: int | None = None):
         """Evaluate `layers` (bottom first). With resume_from=i and a valid snapshot taken at i on a
         previous call (cache_at=i), layers below i are skipped."""
+        self._set_mesh_uniforms()
         ctx = self.gpu.ctx
         ctx.disable(moderngl.BLEND | moderngl.DEPTH_TEST | moderngl.CULL_FACE)
+        # Accumulator clears happen before _use(). An ImGui/window scissor must
+        # not leave channels that no layer writes (especially Normal) uncleared.
+        ctx.scissor = None
         self.stats = {"layers": 0, "passes": 0}
         self.anchors.clear()
         self.anchor_diagnostics = bind_anchor_references(layers)
@@ -443,6 +455,7 @@ class Compositor:
     # ------------------------------------------------------------------ masks
     def _mask(self, lay: Layer, shape=None):
         """Evaluate the mask stack; returns a texture or None (= fully visible)."""
+        self._set_mesh_uniforms()
         if not lay.has_mask_stack() and shape is None:
             return None
         if shape is not None and not lay.mask_enabled:

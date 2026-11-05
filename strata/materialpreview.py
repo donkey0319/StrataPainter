@@ -75,7 +75,13 @@ class MaterialPreviews:
         try:
             self._setup()
             # Clone descriptions: compositing may bind anchors or allocate effect state.
-            self.comp.composite([Layer.from_dict(spec) for spec in specs])
+            preview_layers = [Layer.from_dict(spec) for spec in specs]
+            for layer in preview_layers:
+                # Surface anchors belong to the project mesh, not this sphere.
+                # Preview the editable material; inspect object coverage in the
+                # project viewport and mask preview instead.
+                layer.authored = None
+            self.comp.composite(preview_layers)
             texture = e.gpu.texture((self.SIZE, self.SIZE), 4, dtype="f1", purpose="material preview")
             depth = ctx.depth_renderbuffer(texture.size)
             fbo = ctx.framebuffer([texture], depth)

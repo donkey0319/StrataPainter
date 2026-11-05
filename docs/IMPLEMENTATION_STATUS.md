@@ -1046,3 +1046,21 @@ procedural appearance parity, physical tablet and other GPU platforms were not
 qualified. SP-TUT-02 mask clipboard, SP-TUT-03 spacing phase and SP-TUT-04 discovery
 remain follow-up work. The known low-flow baseline failure remains unchanged;
 the broad feature suite was not rerun for this capture-only change.
+
+## Grenade reconstruction replay
+
+Built an original five-material UV-mapped FBX and authored the tutorial's olive
+body, Height distress/Levels, dirt, red band and repeated gold bells through
+Strata's native engine, then reopened the portable 2K project in the actual
+desktop. Twenty native workflow assertions and actual FLOAT EXR-header validation
+pass. The editable FBX/Blender source, v16 project, body-only Arnold maps and
+screenshots remain local under `.artifacts/tutorial-grenade/`.
+
+The replay exposed and fixed shared thumbnail mesh-uniform leakage, inherited
+scissoring during accumulator initialization, and mesh-bound authored coverage
+being incorrectly evaluated on thumbnail spheres. Native interleaved evaluations
+now preserve pixels exactly; desktop first-open material and normal buffers match
+the delivered maps within their file precision. Tests and evidence remain ignored.
+The final material/projection and authored-object regression passes 28 cases.
+See [the reconstruction report](GRENADE_TUTORIAL_RECONSTRUCTION.md) for commands,
+checks, the before/after discrepancies and explicit approximation limits.
