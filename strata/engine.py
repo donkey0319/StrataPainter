@@ -2694,6 +2694,9 @@ class Engine:
                (effect.kind == "generator" and effect.params.get("micro_normal"))
                for layer in self.all_layers_all_sets() for effect in layer.mask_effects):
             meta["version"] = 15
+        if any(effect.kind == "mask_anchor" and effect.params.get("capture", 0) == 1
+               for layer in self.all_layers_all_sets() for effect in layer.mask_effects):
+            meta["version"] = 16
         meta, blobs, records, diagnostics = projectio.package_resources(
             meta, path, portable, self.project_resources, BUILTIN_ALPHAS)
         for sd in meta["sets"]:

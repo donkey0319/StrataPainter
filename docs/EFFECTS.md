@@ -80,6 +80,30 @@ a source on an earlier evaluated layer in the same texture set. Missing,
 forward and cyclic sources retain the existing black fallback and diagnostics.
 Existing content anchors continue to capture accumulated material output.
 
+### Reuse editable path coverage
+
+On a path's **mask_anchor** row, enable **Final authored coverage**. On a later
+fill layer, add a mask **anchor** and select that named source. The second material
+follows the path without sampling underlying Height or copying its material.
+Moving points or changing spacing regenerates both masks. The capture route also
+includes ribbon, region, text and decal shapes.
+
+With this option enabled, capture occurs after the entire mask stack, geometry
+restriction and authored shape, regardless of the definition row's position. It
+excludes material channels, layer opacity and group opacity. With the option off,
+the existing positional capture remains unchanged. Bypassing the source mask,
+definition or source layer makes the capture unavailable (black fallback).
+References retain the existing same-texture-set, earlier-layer ownership rules,
+stable IDs and missing/forward/cyclic diagnostics. This is a live reference;
+independent mask copy/paste is a separate workflow.
+
+Final coverage uses optional project schema **v16**, storing integer `capture: 1`
+on the mask anchor. Missing or zero means the original positional capture; old
+projects need no migration. Invalid modes and v15 archives claiming final coverage
+are rejected during preflight. Older readers reject v16 rather than silently
+opening a project with different coverage. Mask previews include authored shapes
+so inspecting the source cannot overwrite its capture with an unshaped mask.
+
 Add **bevel** after a mask reference to turn its binary boundary into a smooth
 distance ramp. **Bevel radius** is 0–32 texture pixels, with zero preserving the
 input. Put this mask on a Height-only fill to create chip relief, and reuse the

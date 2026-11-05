@@ -18,7 +18,7 @@ import zipfile
 
 import numpy as np
 
-VERSION = 15
+VERSION = 16
 _HASH = re.compile(r"^[a-f0-9]{64}$")
 _BAKES = {"position": (4, "f4"), "world_normal": (4, "f2"), "curvature": (4, "f2"),
           "projection_diagnostics": (4, "f1"),
@@ -311,6 +311,10 @@ def validate(meta, arrays):
                             raise ValueError("Invalid mask effect " + key)
                     if kind == "mask_anchor" and (not isinstance(params.get("name"), str) or not params["name"].strip()):
                         raise ValueError("Mask anchor requires a name")
+                    if kind == "mask_anchor":
+                        capture = params.get("capture", 0)
+                        if type(capture) is not int or capture not in (0, 1) or (capture == 1 and version < 16):
+                            raise ValueError("Final authored coverage requires version-16 capture metadata")
                 if effect.get("kind") == "graph":
                     from .graphs import validate as validate_graph
                     if version < 11:raise ValueError("Native graphs require project version 11")

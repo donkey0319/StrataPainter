@@ -4,6 +4,9 @@ T17 stores authored objects on ordinary fill-material layers. Their coverage is
 evaluated at the current texture-set resolution; material values, seven bitmap slots,
 effects, blending, masks and projection remain editable. The objects are not flattened
 into paint pixels. The original one-shot `paint_path` helper remains available.
+To reuse an object's coverage on an independent material, add a mask anchor and
+enable **Final authored coverage**, then reference it from a later layer's mask.
+See [Effects](EFFECTS.md#reuse-editable-path-coverage) for capture and storage rules.
 
 ## Desktop workflow
 

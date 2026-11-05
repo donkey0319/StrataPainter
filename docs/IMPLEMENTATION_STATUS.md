@@ -1010,3 +1010,39 @@ successful Save and Continue, and a destination that rejects replacement. It als
 verified the existing quit and save flow. All seven CPU archive contracts passed,
 including preservation of the previous archive after a publication failure.
 The persistence suite's six optional GPU cases were skipped in this run.
+
+## Grenade tutorial follow-up: SP-TUT-01
+
+Reproduced the handoff's authored-path gap on a two-point procedural plane:
+legacy positional mask anchors captured white before path multiplication. Added
+an opt-in final authored coverage capture to existing mask anchors, exposed in
+the desktop editor and selected through the existing stable-ID source picker.
+It shares scalar detail coverage independently of underlying material Height.
+Existing positional and accumulated-content anchors retain their contracts.
+Source mask preview now evaluates the authored shape as well, preventing preview
+inspection from overwriting the live capture with an unshaped mask.
+
+Optional archive v16 stores `capture: 1`; absent/zero retains positional behavior.
+Preflight rejects invalid modes and final capture in older versions. No resource
+or raster storage is added. Undo, dirty state and source ownership use existing APIs.
+
+Local Windows/RTX 4050 qualification (tests/evidence remain ignored):
+- `tests/grenade_coverage_check.py`: reproduced before editing; post-change GPU
+  scenario passes exact scalar coverage equality, point/spacing/filter edits,
+  preview stability, undo/redo, rename, forward reorder diagnostics, deletion,
+  mask bypass, portable reopen, 128px resize and schema rejection cases.
+- `tests/grenade_ui_check.py .artifacts/grenade-ui`: 21 desktop assertions pass,
+  including capture control/undo, source picker, independent paint and save/reopen.
+  The final-coverage controls screenshot was visually inspected.
+- `tests/tutorial_workflow_check.py`: 7 existing linked-workflow cases pass.
+- `tests/authored_check.py --gpu .artifacts/grenade-authored-regression`: 14
+  CPU/GPU authored-object cases pass, including tiled paths, text and decals.
+
+This is the handoff's bounded first increment, not a full grenade scene replay.
+New capture qualification uses a single material/tile at small resolutions; the
+existing tiled authored regressions do not certify cross-tile live references.
+Cross-set references remain unavailable. Exact Adobe bell assets/count, 2K export,
+procedural appearance parity, physical tablet and other GPU platforms were not
+qualified. SP-TUT-02 mask clipboard, SP-TUT-03 spacing phase and SP-TUT-04 discovery
+remain follow-up work. The known low-flow baseline failure remains unchanged;
+the broad feature suite was not rerun for this capture-only change.

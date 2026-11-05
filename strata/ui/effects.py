@@ -170,7 +170,11 @@ class EffectsUI:
                 imgui.text_wrapped("Rows evaluate top to bottom. This row owns its paint; place filters before or after it.")
         elif kind == "mask_anchor":
             self.param(effect, "name", "Mask anchor", "text")
-            imgui.text_wrapped("Captures the mask at this row, before subsequent filters and geometry restrictions.")
+            if app._row("Final authored coverage"):
+                changed, final = imgui.checkbox("Final authored coverage", effect.params.get("capture", 0) == 1)
+                app._edit_value("Anchor capture coverage", effect, "params",
+                                dict(effect.params, capture=int(final)), changed)
+            imgui.text_wrapped("At this row captures before later filters and geometry restrictions. Final authored coverage includes all mask filters, geometry restrictions and the path, ribbon, region, text or decal shape. It excludes material channels and layer opacity.")
         elif kind == "anchor":
             if mask:
                 self.anchor_source(effect)

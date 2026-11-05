@@ -464,12 +464,16 @@ class Compositor:
             if not e.enabled:
                 continue
             if e.kind == "mask_anchor":
-                self._capture_mask_anchor(e, self.masks[m])
+                if not e.params.get("capture", 0):
+                    self._capture_mask_anchor(e, self.masks[m])
                 continue
             m = self._mask_effect(lay, e, m)
         if lay.part_mask is not None:
             m = self._part_filter(lay, m)
         if shape is not None:m=self._mask_pass(m,11,{"u_map":(1,shape)},lambda p:None)
+        for e in lay.mask_effects:
+            if e.enabled and e.kind == "mask_anchor" and e.params.get("capture", 0) == 1:
+                self._capture_mask_anchor(e, self.masks[m])
         return self.masks[m]
 
     def _set_gen(self, p, gen: MaskGen, seed: float):
@@ -671,7 +675,12 @@ class Compositor:
     def render_mask(self, lay: Layer):
         """Final mask of `lay` into mask_preview (white if it has none)."""
         self.gpu.ctx.disable(moderngl.BLEND)
-        m = self._mask(lay)
+        if lay.authored is not None or lay.proj.decal:
+            from .authored import evaluate
+            with evaluate(self, lay) as shape:
+                m = self._mask(lay, shape)
+        else:
+            m = self._mask(lay)
         p = self.p_preview
         self._use(self.mpfbo)
         self.gpu.bind(p, {"u_src": (0, m if m is not None else self.gpu.white)})
