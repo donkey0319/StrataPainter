@@ -1064,3 +1064,19 @@ the delivered maps within their file precision. Tests and evidence remain ignore
 The final material/projection and authored-object regression passes 28 cases.
 See [the reconstruction report](GRENADE_TUTORIAL_RECONSTRUCTION.md) for commands,
 checks, the before/after discrepancies and explicit approximation limits.
+
+## Grenade save replay follow-up
+
+Replayed all 20 native authoring assertions and 15 actual desktop save/edit/reopen
+assertions on isolated 2K files. Ordinary/portable Save, Save As, backups and
+Unicode/spaced relocation preserve Color, material and Normal pixels exactly;
+the user's original archive validates and was preserved.
+
+Fixed a reproduced Windows-console error where saving a filename containing
+characters outside cp950 could write the archive successfully and then terminate
+the app while printing the confirmation. UI status/log text remains Unicode;
+console output is escaped where needed and closed/broken output is nonfatal.
+The actual non-codepage 2K Save As/reopen is covered locally, alongside 22 passing
+persistence/project-controller/console regressions. Save times for the roughly
+95 MB project remain 37–39 seconds and synchronous. See the reconstruction report
+for local evidence and remaining limits. Tests and generated files remain ignored.

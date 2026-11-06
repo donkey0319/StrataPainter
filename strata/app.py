@@ -401,7 +401,19 @@ class App:
         self.status, self.status_t = text, time.time()
         self.log.append((time.strftime("%H:%M:%S"), text))
         del self.log[:-300]
-        print(text)
+        # Console output is secondary to the UI log. A successful save must not
+        # crash because its path cannot be encoded by a Windows console, or the
+        # launcher's output stream has been closed.
+        try:
+            print(text)
+        except UnicodeEncodeError:
+            encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+            try:
+                print(str(text).encode(encoding, "backslashreplace").decode(encoding))
+            except (OSError, ValueError):
+                pass
+        except (OSError, ValueError):
+            pass
 
     def _run_busy(self, label, fn, detail="Baking AO and curvature on the GPU"):
         self.pending = (label, fn)

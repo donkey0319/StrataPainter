@@ -81,3 +81,33 @@ regression passes 14 material/projection and 14 authored-object CPU/GPU cases.
 Local interleaving/scissor checks preserve the complete normal map exactly.
 The known low-flow baseline failure is unchanged; no assertions or references
 were weakened, and the broad feature suite was not rerun for this bounded repair.
+
+## Save/edit replay follow-up
+
+Repeated the full native authoring workflow in `.artifacts/grenade-save-replay/`
+and passed all 20 assertions, including 2K portable save/reopen and body export.
+The original user project was preserved. Its existing archive also passed
+preflight and retained the delivered layer definitions.
+
+`tests/grenade_save_check.py` exercised the actual desktop save controller after
+material, path-point/spacing and independent mask-paint edits. All 15 assertions
+pass for Save As, ordinary Save, backup creation, portable resave, Unicode/spaced
+Save As, moved-file reopen and archive preflight. Color, material and normal
+outputs remain exactly equal across those round trips. Results and the reviewed
+desktop screenshot stay under `.artifacts/grenade-save-check/`.
+
+A separate reproducible save-related crash was found in status logging: a Windows
+cp950 console cannot print a confirmation containing an emoji filename. The
+archive write could succeed and then the uncaught `UnicodeEncodeError` from
+`App.msg` could terminate the desktop loop. Console logging now escapes only
+unencodable console characters and tolerates closed/broken output; UI status and
+the in-app log retain the complete Unicode path. This does not change archive
+serialization. The local `tests/grenade_unicode_save_ui_check.py` covers an actual
+2K desktop Save As/reopen with a non-codepage filename.
+
+Final focused regressions pass 13 persistence CPU/GPU cases, seven project
+protection/controller cases and two console-output cases. No archive corruption
+was reproduced in this follow-up. Large-project saves remain synchronous: the
+measured ordinary/portable/Save As operations took 37.3–38.7 seconds for roughly
+95 MB files on this host. Save responsiveness is a remaining limitation; the
+console repair does not claim to eliminate that pause.
