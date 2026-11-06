@@ -2704,14 +2704,32 @@ class Engine:
         projectio.validate(meta, arrays)
         return meta, arrays, blobs, records, diagnostics
 
-    def save(self, path, portable=False, backups=0):
-        """Atomically save a v3 project; portable embeds its external dependencies."""
-        self.commit_edit()
+    def prepare_save(self, path, portable=False, commit=True):
+        """Capture owned CPU data on the GL thread for a synchronous or queued save."""
+        if commit:
+            self.commit_edit()
         meta, arrays, blobs, records, diagnostics = self._project_snapshot(path, portable)
-        projectio.atomic_write(path, meta, arrays, blobs, backups)
-        self.project_path = os.path.abspath(path)
-        self.project_resources, self.project_diagnostics = records, diagnostics
+        # Mesh arrays may otherwise alias editable project geometry.
+        arrays = {key: value.copy() if key.startswith("mesh_") else value for key, value in arrays.items()}
+        return SimpleNamespace(path=os.path.abspath(path), meta=meta, arrays=arrays, blobs=blobs,
+                               records=records, diagnostics=diagnostics, mesh=self.mesh,
+                               serial=self._edit_serial, signature=self._signature())
+
+    def finish_save(self, snapshot):
+        """Publish successful save state on the owning thread; never clear newer edits."""
+        if (self.mesh is not snapshot.mesh or self._edit_serial != snapshot.serial
+                or self._signature() != snapshot.signature):
+            return False
+        self.project_path = snapshot.path
+        self.project_resources, self.project_diagnostics = snapshot.records, snapshot.diagnostics
         self.mark_saved()
+        return True
+
+    def save(self, path, portable=False, backups=0):
+        """Atomically save a project; portable embeds its external dependencies."""
+        snapshot = self.prepare_save(path, portable)
+        projectio.atomic_write(snapshot.path, snapshot.meta, snapshot.arrays, snapshot.blobs, backups)
+        self.finish_save(snapshot)
 
     def autosave(self, path, backups=3):
         """Write a portable recovery snapshot without clearing the user's modified state."""

@@ -17,6 +17,21 @@ effects continue to save as v3. See [effect storage and compatibility](EFFECTS.m
 
 ## Engine operations
 
+Desktop Save, Save As, portable saves and recovery snapshots capture project data
+on the graphics thread, then compress, write and verify the archive on a worker.
+The window continues rendering a save-stage/elapsed-time overlay; editing and
+project replacement wait for completion. Save-before-close, quit and replacement
+continue only after verified publication. Failures retain unsaved state and show
+the save-error dialog. Snapshot capture still briefly occupies the graphics
+thread, and large archives can take tens of seconds to finish.
+
+The synchronous engine API remains available. Integrations can call
+`prepare_save(path, portable=False, commit=True)` on the graphics thread, pass the
+returned CPU metadata/arrays/blobs to `projectio.atomic_write`, then call
+`finish_save(snapshot)` on the owning thread after successful publication. It
+returns false rather than marking newer edits saved if the document changed.
+`atomic_write(..., progress=callback)` reports archive stages without accessing GL.
+
 ```python
 engine.save(path)                         # atomic save, external references allowed
 engine.save(path, portable=True, backups=3)

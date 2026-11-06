@@ -37,6 +37,7 @@ eng.update(); eng.update_view(w, h); eng.render((x, y, w, h))
 | `strata.uvprep.prepare_mesh(mesh, settings, source_unit=None)` | Preserve/generate UVs through installed Blender; returns a new mesh. Optional tile_count=1..64 distributes intact angle-seam charts across UDIM pages. Settings and limits in UV_PREPARATION_SCALE.md. |
 | `strata.exporter.export_mesh(eng, path, coordinates='normalized')` | OBJ with generated UVs/material groups; coordinates also accept `'source'` and `'meters'`. Meter delivery requires declared units. |
 | `autosave(path, backups=3)` | Writes a portable recovery snapshot without clearing modified state or changing the manual-save destination. |
+| `prepare_save(path, portable=False, commit=True)` / `finish_save(snapshot)` | Capture owned CPU archive data on the graphics thread, then publish successful save state on that thread. Completion refuses to clear newer edits. Desktop saves run archive compression/write/verification on a worker; `save()` remains synchronous. See PERSISTENCE.md. |
 | `project_resources`, `project_diagnostics` | Resource manifest and actionable missing/changed resource or bake-restoration diagnostics. |
 | `relink_resources(mapping)` | Replace resource IDs or recorded paths with validated local files; retained mesh bakes are not implicitly rebaked. |
 | `mark_modified()` | Marks recovered content as unsaved so normal close/save protection applies. |

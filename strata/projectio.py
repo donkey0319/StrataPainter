@@ -482,23 +482,31 @@ def resolve_resources(meta, blobs, path, builtin_alphas=()):
     return out, records, diagnostics, temp
 
 
-def atomic_write(path, meta, arrays, blobs=(), backups=0):
+def atomic_write(path, meta, arrays, blobs=(), backups=0, progress=None):
     """Validate a sibling archive and replace only after complete durable write."""
     destination = Path(path).resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix="." + destination.name + ".", suffix=".tmp", dir=destination.parent)
     try:
         with os.fdopen(fd, "w+b") as output:
+            if progress:
+                progress("Compressing project data")
             buf = io.BytesIO(); np.savez_compressed(buf, **arrays)
+            if progress:
+                progress("Writing project archive")
             with zipfile.ZipFile(output, "w", zipfile.ZIP_STORED) as archive:
                 archive.writestr("project.json", _json(meta))
                 archive.writestr("data.npz", buf.getvalue())
                 for name, content in dict(blobs).items():
                     archive.writestr(name, content)
             output.flush(); os.fsync(output.fileno())
+        if progress:
+            progress("Verifying saved archive")
         read_archive(temporary)
         count = max(0, int(backups))
         if count and destination.is_file():
+            if progress:
+                progress("Updating backups")
             for index in range(count, 1, -1):
                 previous = Path(str(destination) + f".bak{index - 1}")
                 if previous.is_file():
@@ -511,6 +519,8 @@ def atomic_write(path, meta, arrays, blobs=(), backups=0):
             finally:
                 if os.path.exists(backup_tmp):
                     os.unlink(backup_tmp)
+        if progress:
+            progress("Publishing saved project")
         os.replace(temporary, destination)
     finally:
         if os.path.exists(temporary):

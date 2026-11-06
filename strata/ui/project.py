@@ -45,12 +45,12 @@ class ProjectUI:
             registry.add("file.export_mesh_" + coordinates, label, "File",
                          lambda coordinates=coordinates: self.export_mesh(coordinates), [], self.app._has)
         registry.add("file.save_portable", "Save Portable Project...", "File",
-                     lambda: self.app._save(save_as=True, portable=True), [], self.app._has,
+                     lambda: self.app._save(save_as=True, portable=True, background=True), [], self.app._has,
                      tip="Collect referenced resources into the project archive.")
         registry.add("file.resources", "Project Resources...", "File",
                      lambda: setattr(self, "open_resources", True), [], self.app._has)
         registry.add("file.recover", "Recover Autosave...", "File", self.show_recovery)
-        registry.add("file.autosave", "Create Recovery Snapshot", "File", self.autosave_now,
+        registry.add("file.autosave", "Create Recovery Snapshot", "File", lambda: self.autosave_now(background=True),
                      [], self.app._has)
 
     def show_recovery(self):
@@ -108,28 +108,37 @@ class ProjectUI:
         key = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
         return self.recovery_dir / (key + ".strata")
 
-    def autosave_now(self):
+    def autosave_now(self, background=False):
+        if getattr(self.app, "_save_job", None) is not None:
+            return False
         engine = self.app.engine
         if engine.mesh is None:
             return False
         path = self._snapshot_path()
         try:
             self.recovery_dir.mkdir(parents=True, exist_ok=True)
-            engine.autosave(str(path), backups=self.backups)
             record = {"file": path.name, "source": self.app.project_path,
                       "name": engine.mesh.name, "timestamp": time.time()}
-            metadata = path.with_suffix(".json")
-            temporary = metadata.with_suffix(".json.tmp")
-            temporary.write_text(json.dumps(record, indent=2), encoding="utf-8")
-            os.replace(temporary, metadata)
-            self.last_snapshot = (id(engine.mesh), engine._edit_serial, engine._signature())
-            self.last_recovery = str(path)
-            self.app.msg("Recovery snapshot saved" +
-                         ("; your project still has its unsaved changes." if engine.modified else "."))
+            stamp = (id(engine.mesh), engine._edit_serial, engine._signature())
+            if background and hasattr(self.app, "_save_recovery"):
+                return self.app._save_recovery(path, lambda: self._finish_recovery(path, record, stamp))
+            engine.autosave(str(path), backups=self.backups)
+            self._finish_recovery(path, record, stamp)
             return True
         except Exception as error:
             self.app.msg(f"Recovery snapshot failed: {error}")
             return False
+
+    def _finish_recovery(self, path, record, stamp):
+        engine = self.app.engine
+        metadata = path.with_suffix(".json")
+        temporary = metadata.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(record, indent=2), encoding="utf-8")
+        os.replace(temporary, metadata)
+        self.last_snapshot = stamp
+        self.last_recovery = str(path)
+        self.app.msg("Recovery snapshot saved" +
+                     ("; your project still has its unsaved changes." if engine.modified else "."))
 
     def tick(self, now=None):
         now = time.monotonic() if now is None else now
@@ -138,11 +147,12 @@ class ProjectUI:
         self.next_check = now + max(1, self.interval) * 60
         engine = self.app.engine
         if (not self.interval or engine.mesh is None or self.app.pending or self.app.drag
+                or getattr(self.app, "_save_job", None) is not None or getattr(engine, "edit_active", False)
                 or getattr(engine, "_stroke", None) is not None or not engine.modified):
             return
         stamp = (id(engine.mesh), engine._edit_serial, engine._signature())
         if stamp != self.last_snapshot:
-            self.autosave_now()
+            self.autosave_now(background=True)
 
     def recover(self, record):
         # Engine.load is transactional; only update the UI after successful adoption.
@@ -264,7 +274,7 @@ class ProjectUI:
             imgui.end_disabled()
             imgui.same_line()
             if imgui.button("Save portable..."):
-                self.app._save(save_as=True, portable=True)
+                self.app._save(save_as=True, portable=True, background=True)
             if imgui.button("Close##resources") or imgui.is_key_pressed(imgui.Key.escape):
                 imgui.close_current_popup()
             imgui.end_popup()

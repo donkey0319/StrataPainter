@@ -30,6 +30,9 @@ import re
 import sys
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
+from queue import SimpleQueue
+from types import SimpleNamespace
 
 import glfw
 import moderngl
@@ -38,7 +41,7 @@ from imgui_bundle import imgui
 from imgui_bundle.python_backends.glfw_backend import GlfwRenderer
 
 from .engine import Engine
-from . import exporter as texture_exporter
+from . import exporter as texture_exporter, projectio
 from .baker import BakeSettings
 from .channels import CHANNEL_DESCRIPTORS
 from .layers import BLEND_MODES, CHANNELS, GENERATORS, HEIGHT_BLEND, STENCIL_TILING, SYMMETRY, MASK_EFFECTS, CONTENT_EFFECTS
@@ -361,6 +364,8 @@ class App:
         self.spp_info, self.spp_set, self.open_spp = None, 0, False
         self.report, self.open_report = None, False
         self.busy_detail = ""
+        self._save_job = None
+        self._save_executor = None
         self._scan_substance()
         self._build_commands()
         self.reg.overrides = {k: list(v) for k, v in self.settings.get("keys", {}).items()}
@@ -449,6 +454,9 @@ class App:
                     break
 
     def _on_drop(self, window, paths):
+        if getattr(self, "_save_job", None) is not None:
+            self.msg("Please wait for the project save to finish.")
+            return
         if not paths:
             return
         p = paths[0]
@@ -496,7 +504,16 @@ class App:
         for diagnostic in getattr(self.engine, "project_diagnostics", []):
             self.msg(str(diagnostic.get("message", diagnostic)))
 
-    def _save(self, save_as=False, portable=False):
+    def _save(self, save_as=False, portable=False, background=False, on_success=None):
+        if getattr(self, "_save_failure", None) is not None:
+            self.msg("Please acknowledge the save error before trying again.")
+            return False
+        if getattr(self, "pending", None) is not None:
+            self.msg("Please wait for the current project operation to finish.")
+            return False
+        if getattr(self, "_save_job", None) is not None:
+            self.msg("A project save is already in progress.")
+            return False
         path = self.project_path
         try:
             self._finish_fill_projection()
@@ -510,6 +527,10 @@ class App:
                     return False
                 if not path.lower().endswith(".strata"):
                     path += ".strata"
+            if background:
+                snapshot = self.engine.prepare_save(path, portable)
+                self._start_save_job(snapshot, portable=portable, on_success=on_success)
+                return True
             self.engine.save(path, portable=portable, backups=self.project_ui.backups)
         except Exception as e:
             self._save_failure = (path, str(e) or type(e).__name__)
@@ -520,7 +541,66 @@ class App:
         self.msg(f"Saved {'portable project ' if portable else ''}{path}")
         return True
 
+    def _start_save_job(self, snapshot, portable=False, on_success=None, recovery=False):
+        """Only immutable CPU archive data reaches the worker; GL stays on this thread."""
+        if self._save_executor is None:
+            self._save_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="strata-save")
+        events = SimpleQueue()
+        job = SimpleNamespace(snapshot=snapshot, events=events, phase="Preparing archive",
+                              started=time.monotonic(), portable=portable, recovery=recovery,
+                              on_success=on_success)
+        job.future = self._save_executor.submit(projectio.atomic_write, snapshot.path, snapshot.meta,
+            snapshot.arrays, snapshot.blobs, self.project_ui.backups, events.put)
+        self._save_job = job
+        self._save_failure = None
+        self.msg("Saving recovery snapshot..." if recovery else "Saving project...")
+
+    def _save_recovery(self, path, on_success):
+        if self._save_job is not None or self._save_failure is not None:
+            return False
+        snapshot = self.engine.prepare_save(path, portable=True, commit=False)
+        self._start_save_job(snapshot, on_success=on_success, recovery=True)
+        return True
+
+    def _poll_save(self):
+        job = self._save_job
+        if job is None:
+            return
+        while not job.events.empty():
+            job.phase = job.events.get()
+        if not job.future.done():
+            return
+        self._save_job = None
+        try:
+            job.future.result()
+            if not job.recovery:
+                if not self.engine.finish_save(job.snapshot):
+                    self.msg("Project snapshot saved; newer changes remain unsaved.")
+                    return
+                self.project_path = job.snapshot.path
+                self.msg(f"Saved {'portable project ' if job.portable else ''}{self.project_path}")
+            if job.on_success is not None:
+                job.on_success()
+        except Exception as error:
+            self._save_failure = (job.snapshot.path, str(error) or type(error).__name__)
+            self.msg(f"Save failed: {error}")
+
+    def _save_overlay(self, ww, wh):
+        job = self._save_job
+        if job is None:
+            return
+        imgui.set_next_window_pos(V2(ww / 2, wh / 2), 0, V2(0.5, 0.5))
+        flags = imgui.WindowFlags_.no_decoration | imgui.WindowFlags_.always_auto_resize
+        imgui.begin("##saving-project", None, flags)
+        imgui.text("Saving recovery snapshot..." if job.recovery else "Saving project...")
+        imgui.text(job.phase)
+        imgui.text_disabled(f"{time.monotonic() - job.started:.0f}s elapsed - please keep Strata open")
+        imgui.end()
+
     def _request_replacement(self, action):
+        if getattr(self, "_save_job", None) is not None:
+            self.msg("Please wait for the project save to finish.")
+            return
         self._finish_fill_projection()
         self._finish_property_edit()
         self.engine.end_stroke()
@@ -537,6 +617,10 @@ class App:
     def _on_close_request(self, window):
         """Window close button / Alt+F4 / File > Quit: when the project has unsaved changes, keep
         the window open and ask whether to save first (the "Unsaved Changes" dialog)."""
+        if getattr(self, "_save_job", None) is not None:
+            glfw.set_window_should_close(window, False)
+            self.msg("Please wait for the project save to finish.")
+            return
         if self._quit_ok:
             return
         try:
@@ -1179,8 +1263,8 @@ class App:
               tip="Mesh, every texture set with its layer stack, and the recorded paint strokes.")
         R.add("file.import_preset", "Import smart material / smart mask...", "File", self._ask_import_preset, [], has,
               tip="Add a Painter .spsm to the Layer Stack, or apply a .spmsk to the selected layer.")
-        R.add("file.save", "Save", "File", self._save, ["Ctrl+S"], has)
-        R.add("file.save_as", "Save As...", "File", lambda: self._save(save_as=True), ["Ctrl+Shift+S"], has)
+        R.add("file.save", "Save", "File", lambda: self._save(background=True), ["Ctrl+S"], has)
+        R.add("file.save_as", "Save As...", "File", lambda: self._save(save_as=True, background=True), ["Ctrl+Shift+S"], has)
         self.project_ui.register_commands(R)
         R.add("file.close", "Close Project", "File", lambda: setattr(self, "open_close", True), ["Ctrl+F4"], has)
         R.add("file.export", "Export Textures...", "File", lambda: setattr(self, "open_export", True),
@@ -1389,6 +1473,8 @@ class App:
                 self.project_ui.tick()
         finally:
             self.assistant_ui.close()
+            if self._save_executor is not None:
+                self._save_executor.shutdown(wait=True)
         self._save_settings()
         try:
             if self.ini_path:
@@ -1408,8 +1494,11 @@ class App:
         glfw.terminate()
 
     def frame(self):
-        self.assistant_ui.tick()
+        self._poll_save()
+        if self._save_job is None:
+            self.assistant_ui.tick()
         imgui.new_frame()
+        imgui.begin_disabled(self._save_job is not None)
         ww, wh = glfw.get_window_size(self.window)
         fw, fh = glfw.get_framebuffer_size(self.window)
         self.fb_scale = (fw / max(ww, 1), fh / max(wh, 1))
@@ -1444,10 +1533,12 @@ class App:
         self.palette.draw(self.reg, self.msg, self.ui_scale)
         if getattr(self, "_property_edit_key", None) is not None and not imgui.is_any_item_active():
             self._finish_property_edit(cancel=imgui.is_key_pressed(imgui.Key.escape))
+        imgui.end_disabled()
+        self._save_overlay(ww, wh)
         if self.pending:
             self.busy_overlay(ww, wh)
             self._pending_shown += 1
-        if not self.pending:
+        if not self.pending and self._save_job is None:
             self.shortcuts()
             if has_project:
                 try:
@@ -4567,8 +4658,7 @@ class App:
             if self._close_unsaved:
                 imgui.text_disabled("Changes since the last save will be lost unless you save.")
             if imgui.button("Save and close", V2(130 * s, 0)):
-                if self._save():
-                    self._close_project()
+                self._save(background=True, on_success=self._close_project)
                 imgui.close_current_popup()
             imgui.same_line()
             if imgui.button("Close", V2(100 * s, 0)):
@@ -4587,8 +4677,7 @@ class App:
             imgui.spacing()
             if imgui.button("Save", V2(110 * s, 0)) or imgui.is_key_pressed(imgui.Key.enter):
                 imgui.close_current_popup()
-                if self._save():
-                    self._quit_now()
+                self._save(background=True, on_success=self._quit_now)
             _tip("Save the project, then quit. Cancelling the file dialog keeps Strata open.")
             imgui.same_line()
             if imgui.button("Don't Save", V2(110 * s, 0)):
@@ -4620,8 +4709,10 @@ class App:
             if save or discard or cancel:
                 self._project_replacement = None
                 imgui.close_current_popup()
-                if discard or (save and self._save()):
+                if discard:
                     action()
+                elif save:
+                    self._save(background=True, on_success=action)
             imgui.end_popup()
 
         if self._save_failure is not None and not imgui.is_popup_open("", popup_flags):

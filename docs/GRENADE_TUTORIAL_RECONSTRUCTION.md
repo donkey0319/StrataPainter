@@ -111,3 +111,30 @@ was reproduced in this follow-up. Large-project saves remain synchronous: the
 measured ordinary/portable/Save As operations took 37.3–38.7 seconds for roughly
 95 MB files on this host. Save responsiveness is a remaining limitation; the
 console repair does not claim to eliminate that pause.
+
+## Save responsiveness repair
+
+The subsequent freeze report identified the synchronous archive work above as
+the remaining issue. Desktop Save/Save As/portable saves and recovery now capture
+owned CPU data on the graphics thread, then compress/write/verify on one worker.
+The editor shows the real archive stage and elapsed time while rendering; editing
+and project replacement wait. Save-and-close/quit/continue execute only after
+verified publication. Failed writes retain dirty state and the previous archive.
+The synchronous engine API and archive format are preserved.
+
+`tests/responsive_save_check.py` passed 16 actual-desktop assertions on the 2K
+grenade. Capture took 3.57 seconds; manual save rendered 666 frames over 66.72
+seconds and recovery rendered 667 over 66.44 seconds. Reopened Color, material and
+Normal pixels matched exactly. Injected write failure preserved the previous
+file's SHA256, retained dirty edits and suppressed the success continuation.
+Acknowledging the real failure dialog allowed a subsequent valid recovery save.
+Evidence, progress screenshot and the validated project are local under
+`.artifacts/responsive-save/` with the complete run log at
+`.artifacts/responsive-save-run.log`.
+
+Final regressions pass 13 persistence CPU/GPU cases, seven project-controller
+cases, one snapshot ownership/newer-edit case, two logging cases and the actual
+desktop unsaved/replacement/quit flow with zero failures. No tests or evidence
+are committed. Snapshot capture still pauses briefly, and rendering competes with
+compression, so total save time can increase; the archive phase remains responsive.
+The known low-flow baseline is unchanged and was not rerun for this save repair.

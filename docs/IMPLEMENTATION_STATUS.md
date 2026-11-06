@@ -1080,3 +1080,19 @@ The actual non-codepage 2K Save As/reopen is covered locally, alongside 22 passi
 persistence/project-controller/console regressions. Save times for the roughly
 95 MB project remain 37–39 seconds and synchronous. See the reconstruction report
 for local evidence and remaining limits. Tests and generated files remain ignored.
+
+## Responsive desktop save follow-up
+
+The reported freeze was reproduced as archive compression and verification on
+the UI thread. Desktop manual/portable saves and recovery snapshots now capture
+CPU data on the graphics thread and run archive work on one background worker.
+A stage/elapsed-time overlay keeps rendering; editing, replacement and close wait
+for completion. Save-and-close/quit/continue run only after successful publication.
+Failure keeps the document dirty and preserves the previous archive. The engine's
+synchronous save API and archive format remain unchanged. Snapshot capture is
+still synchronous; this improves responsiveness rather than compression speed.
+
+Actual 2K desktop save/reopen, failure preservation, recovery and deferred
+continuation checks are recorded in the grenade reconstruction report. Focused
+persistence, controller, snapshot-ownership and logging regressions pass. Evidence
+and tests remain local and ignored; the known low-flow baseline is unchanged.
